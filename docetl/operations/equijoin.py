@@ -7,7 +7,7 @@ import random
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import Pool, cpu_count
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 import numpy as np
 from jinja2 import Template
@@ -19,6 +19,8 @@ from docetl.operations.utils import (
     rich_as_completed,
 )
 from docetl.utils import completion_cost
+from pydantic import Field
+
 
 # Global variables to store shared data
 _right_data = None
@@ -49,6 +51,25 @@ def process_left_item(
 
 
 class EquijoinOperation(BaseOperation):
+    class schema(BaseOperation.schema):
+        type: str = "equijoin"
+        left: str
+        right: str
+        comparison_prompt: str
+        output: Optional[Dict[str, Any]] = None
+        blocking_threshold: Optional[float] = None
+        blocking_conditions: Optional[Dict[str, List[str]]] = None
+        limits: Optional[Dict[str, int]] = None
+        comparison_model: Optional[str] = None
+        optimize: Optional[bool] = None
+        embedding_model: Optional[str] = None
+        embedding_batch_size: Optional[int] = None
+        compare_batch_size: Optional[int] = None
+        limit_comparisons: Optional[int] = None
+        blocking_keys: Optional[Dict[str, List[str]]] = None
+        timeout: Optional[int] = None
+        litellm_completion_kwargs: Dict[str, Any] = Field(default_factory=dict)
+    
     def compare_pair(
         self,
         comparison_prompt: str,
@@ -82,9 +103,13 @@ class EquijoinOperation(BaseOperation):
             {"is_match": "bool"},
             timeout_seconds=timeout_seconds,
             max_retries_per_timeout=max_retries_per_timeout,
+            bypass_cache=self.config.get("bypass_cache", False),
+            litellm_completion_kwargs=self.config.get("litellm_completion_kwargs", {}),
         )
-        output = self.runner.api.parse_llm_response(response, {"is_match": "bool"})[0]
-        return output["is_match"], completion_cost(response)
+        output = self.runner.api.parse_llm_response(
+            response.response, {"is_match": "bool"}
+        )[0]
+        return output["is_match"], response.total_cost
 
     def syntax_check(self) -> None:
         """
@@ -231,6 +256,7 @@ class EquijoinOperation(BaseOperation):
                 f"[yellow]Warning: {dropped_pairs} pairs will be dropped due to the comparison limit. "
                 f"Proceeding with {limit_comparisons} randomly sampled pairs. "
                 f"Do you want to continue?[/yellow]",
+                self.console,
             ):
                 raise ValueError("Operation cancelled by user due to pair limit.")
 

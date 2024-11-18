@@ -3,15 +3,17 @@ The `MapOperation` and `ParallelMapOperation` classes are subclasses of `BaseOpe
 """
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from jinja2 import Environment, Template
 from tqdm import tqdm
 
 from docetl.operations.base import BaseOperation
 from docetl.operations.utils import RichLoopBar
-from docetl.schemas import MapOp, Tool, ToolFunction
+from docetl.base_schemas import Tool, ToolFunction
 from docetl.utils import completion_cost
+from pydantic import Field, field_validator
+from litellm.utils import ModelResponse
 
 
 def render_jinja_template(template_string: str, data: Dict[str, Any]) -> str:
@@ -28,6 +30,32 @@ def render_jinja_template(template_string: str, data: Dict[str, Any]) -> str:
 
 
 class MapOperation(BaseOperation):
+    class schema(BaseOperation.schema):
+        type: str = "map"
+        output: Optional[Dict[str, Any]] = None
+        prompt: Optional[str] = None
+        model: Optional[str] = None
+        optimize: Optional[bool] = None
+        recursively_optimize: Optional[bool] = None
+        sample_size: Optional[int] = None
+        tools: Optional[List[Dict[str, Any]]] = (
+            None  # FIXME: Why isn't this using the Tool data class so validation works automatically?
+        )
+        validation_rules: Optional[List[str]] = Field(None, alias="validate")
+        num_retries_on_validate_failure: Optional[int] = None
+        gleaning: Optional[Dict[str, Any]] = None
+        drop_keys: Optional[List[str]] = None
+        timeout: Optional[int] = None
+        batch_size: Optional[int] = None
+        clustering_method: Optional[str] = None
+        batch_prompt: Optional[str] = None
+        litellm_completion_kwargs: Dict[str, Any] = Field(default_factory=dict)
+        @field_validator("drop_keys")
+        def validate_drop_keys(cls, v):
+            if isinstance(v, str):
+                return [v]
+            return v
+
     def __init__(
         self,
         *args,
@@ -35,7 +63,7 @@ class MapOperation(BaseOperation):
     ):
         super().__init__(*args, **kwargs)
         self.max_batch_size: int = self.config.get(
-            "max_batch_size", kwargs.get("max_batch_size", float("inf"))
+            "max_batch_size", kwargs.get("max_batch_size", None)
         )
         self.clustering_method = "random"
 
@@ -47,7 +75,7 @@ class MapOperation(BaseOperation):
             ValueError: If required keys are missing or invalid in the configuration.
             TypeError: If configuration values have incorrect types.
         """
-        config = MapOp(**self.config)
+        config = self.schema(**self.config)
 
         if config.drop_keys:
             if any(not isinstance(key, str) for key in config.drop_keys):
@@ -56,6 +84,16 @@ class MapOperation(BaseOperation):
             raise ValueError(
                 "If 'drop_keys' is not specified, both 'prompt' and 'output' must be present in the configuration"
             )
+        
+        if config.batch_prompt:
+            try:
+                template = Template(config.batch_prompt)
+                # Test render with a minimal inputs list to validate template
+                template.render(inputs=[{}])
+            except Exception as e:
+                raise ValueError(
+                    f"Invalid Jinja2 template in 'batch_prompt' or missing required 'inputs' variable: {str(e)}"
+                ) from e
 
         if config.prompt or config.output:
             for key in ["prompt", "output"]:
@@ -100,6 +138,7 @@ class MapOperation(BaseOperation):
                             )
 
             self.gleaning_check()
+        
 
     def execute(self, input_data: List[Dict]) -> Tuple[List[Dict], float]:
         """
@@ -134,17 +173,17 @@ class MapOperation(BaseOperation):
         if self.status:
             self.status.stop()
 
-        def _process_map_item(item: Dict) -> Tuple[Optional[Dict], float]:
+        def _process_map_item(item: Dict, initial_result: Optional[Dict] = None) -> Tuple[Optional[Dict], float]:
             prompt_template = Template(self.config["prompt"])
             prompt = prompt_template.render(input=item)
 
-            def validation_fn(response: Dict[str, Any]):
+            def validation_fn(response: Union[Dict[str, Any], ModelResponse]):
                 output = self.runner.api.parse_llm_response(
                     response,
                     schema=self.config["output"]["schema"],
                     tools=self.config.get("tools", None),
                     manually_fix_errors=self.manually_fix_errors,
-                )[0]
+                )[0] if isinstance(response, ModelResponse) else response
                 for key, value in item.items():
                     if key not in self.config["output"]["schema"]:
                         output[key] = value
@@ -153,62 +192,101 @@ class MapOperation(BaseOperation):
                 return output, False
 
             self.runner.rate_limiter.try_acquire("call", weight=1)
-            if "gleaning" in self.config:
-                output, cost, success = self.runner.api.call_llm_with_validation(
-                    [{"role": "user", "content": prompt}],
-                    model=self.config.get("model", self.default_model),
-                    operation_type="map",
-                    schema=self.config["output"]["schema"],
-                    llm_call_fn=lambda messages: self.runner.api.call_llm_with_gleaning(
-                        self.config.get("model", self.default_model),
-                        "map",
-                        messages,
-                        self.config["output"]["schema"],
-                        self.config["gleaning"]["validation_prompt"],
-                        self.config["gleaning"]["num_rounds"],
-                        self.console,
-                        timeout_seconds=self.config.get("timeout", 120),
-                        max_retries_per_timeout=self.config.get(
-                            "max_retries_per_timeout", 2
-                        ),
-                        verbose=self.config.get("verbose", False),
-                    ),
-                    validation_fn=validation_fn,
-                    val_rule=self.config.get("validate", []),
-                    num_retries=self.num_retries_on_validate_failure,
-                    console=self.console,
-                )
-            else:
-                output, cost, success = self.runner.api.call_llm_with_validation(
-                    [{"role": "user", "content": prompt}],
-                    model=self.config.get("model", self.default_model),
-                    operation_type="map",
-                    schema=self.config["output"]["schema"],
-                    llm_call_fn=lambda messages: self.runner.api.call_llm(
-                        self.config.get("model", self.default_model),
-                        "map",
-                        messages,
-                        self.config["output"]["schema"],
+            llm_result = self.runner.api.call_llm(
+                self.config.get("model", self.default_model),
+                "map",
+                [{"role": "user", "content": prompt}],
+                self.config["output"]["schema"],
+                tools=self.config.get("tools", None),
+                scratchpad=None,
+                timeout_seconds=self.config.get("timeout", 120),
+                max_retries_per_timeout=self.config.get("max_retries_per_timeout", 2),
+                validation_config=(
+                    {
+                        "num_retries": self.num_retries_on_validate_failure,
+                        "val_rule": self.config.get("validate", []),
+                        "validation_fn": validation_fn,
+                    }
+                    if self.config.get("validate", None)
+                    else None
+                ),
+                gleaning_config=self.config.get("gleaning", None),
+                verbose=self.config.get("verbose", False),
+                bypass_cache=self.config.get("bypass_cache", False),
+                initial_result=initial_result,
+                litellm_completion_kwargs=self.config.get("litellm_completion_kwargs", {}),
+            )
+
+            if llm_result.validated:
+                # Parse the response
+                if isinstance(llm_result.response, ModelResponse):
+                    output = self.runner.api.parse_llm_response(
+                        llm_result.response,
+                        schema=self.config["output"]["schema"],
                         tools=self.config.get("tools", None),
-                        console=self.console,
-                        timeout_seconds=self.config.get("timeout", 120),
-                        max_retries_per_timeout=self.config.get(
-                            "max_retries_per_timeout", 2
-                        ),
-                    ),
-                    validation_fn=validation_fn,
-                    val_rule=self.config.get("validate", []),
-                    num_retries=self.num_retries_on_validate_failure,
-                    console=self.console,
+                        manually_fix_errors=self.manually_fix_errors,
+                    )[0]
+                else:
+                    output = llm_result.response
+                
+                # Augment the output with the original item
+                output = {**item, **output}
+                return output, llm_result.total_cost
+
+            return None, llm_result.total_cost
+        
+         # If there's a batch prompt, let's use that
+        def _process_map_batch(items: List[Dict]) -> Tuple[List[Dict], float]:
+            total_cost = 0
+            if len(items) > 1 and self.config.get("batch_prompt", None):
+                batch_prompt_template = Template(self.config["batch_prompt"])
+                batch_prompt = batch_prompt_template.render(inputs=items)
+
+                # Issue the batch call
+                llm_result = self.runner.api.call_llm_batch(
+                    self.config.get("model", self.default_model),
+                    "batch map",
+                    [{"role": "user", "content": batch_prompt}],
+                    self.config["output"]["schema"],
+                    verbose=self.config.get("verbose", False),
+                    timeout_seconds=self.config.get("timeout", 120),
+                    max_retries_per_timeout=self.config.get("max_retries_per_timeout", 2),
+                    bypass_cache=self.config.get("bypass_cache", False),
+                    litellm_completion_kwargs=self.config.get("litellm_completion_kwargs", {}),
                 )
+                total_cost += llm_result.total_cost
 
-            if success:
-                return output, cost
+                # Parse the LLM response
+                parsed_output = self.runner.api.parse_llm_response(llm_result.response, self.config["output"]["schema"])[0].get("results", [])
+                items_and_outputs = [(item, parsed_output[idx] if idx < len(parsed_output) else None) for idx, item in enumerate(items)]
+            else:
+                items_and_outputs = [(item, None) for item in items]
 
-            return None, cost
+            # Run _process_map_item for each item 
+            all_results = []
+            if len(items_and_outputs) > 1:
+                with ThreadPoolExecutor(max_workers=self.max_batch_size) as executor:
+                    futures = [executor.submit(_process_map_item, items_and_outputs[i][0], items_and_outputs[i][1]) for i in range(len(items_and_outputs))]
+                    for i in range(len(futures)):
+                        result, item_cost = futures[i].result()
+                        if result is not None:
+                            all_results.append(result)
+                        total_cost += item_cost
+            else:
+                result, item_cost = _process_map_item(items_and_outputs[0][0], items_and_outputs[0][1])
+                if result is not None:
+                    all_results.append(result)
+                total_cost += item_cost
+
+            # Return items and cost
+            return all_results, total_cost
 
         with ThreadPoolExecutor(max_workers=self.max_batch_size) as executor:
-            futures = [executor.submit(_process_map_item, item) for item in input_data]
+            batch_size = self.max_batch_size if self.max_batch_size is not None else 1
+            futures = []
+            for i in range(0, len(input_data), batch_size):
+                batch = input_data[i:i + batch_size]
+                futures.append(executor.submit(_process_map_batch, batch))
             results = []
             total_cost = 0
             pbar = RichLoopBar(
@@ -217,17 +295,16 @@ class MapOperation(BaseOperation):
                 console=self.console,
             )
             for i in pbar:
-                result, item_cost = futures[i].result()
-                if result is not None:
+                result_list, item_cost = futures[i].result()
+                if result_list:
                     if "drop_keys" in self.config:
-                        result = {
+                        result_list = [{
                             k: v
                             for k, v in result.items()
                             if k not in self.config["drop_keys"]
-                        }
-                    results.append(result)
+                        } for result in result_list]
+                    results.extend(result_list)
                 total_cost += item_cost
-                pbar.update(i)
 
         if self.status:
             self.status.start()
@@ -236,6 +313,11 @@ class MapOperation(BaseOperation):
 
 
 class ParallelMapOperation(BaseOperation):
+    class schema(BaseOperation.schema):
+        type: str = "parallel_map"
+        prompts: List[Dict[str, Any]]
+        output: Dict[str, Any]
+
     def __init__(
         self,
         *args,
@@ -366,26 +448,30 @@ class ParallelMapOperation(BaseOperation):
             local_output_schema = {
                 key: output_schema[key] for key in prompt_config["output_keys"]
             }
+            model = prompt_config.get("model", self.default_model)
+            if not model:
+                model = self.default_model
 
             # Start of Selection
             # If there are tools, we need to pass in the tools
             response = self.runner.api.call_llm(
-                prompt_config.get("model", self.default_model),
+                model,
                 "parallel_map",
                 [{"role": "user", "content": prompt}],
                 local_output_schema,
                 tools=prompt_config.get("tools", None),
-                console=self.console,
                 timeout_seconds=self.config.get("timeout", 120),
                 max_retries_per_timeout=self.config.get("max_retries_per_timeout", 2),
+                bypass_cache=self.config.get("bypass_cache", False),
+                litellm_completion_kwargs=self.config.get("litellm_completion_kwargs", {}),
             )
             output = self.runner.api.parse_llm_response(
-                response,
+                response.response,
                 schema=local_output_schema,
                 tools=prompt_config.get("tools", None),
                 manually_fix_errors=self.manually_fix_errors,
             )[0]
-            return output, completion_cost(response)
+            return output, response.total_cost
 
         with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
             if "prompts" in self.config:

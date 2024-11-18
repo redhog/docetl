@@ -10,6 +10,7 @@
   --color-icon: #17a2b8;
 } */
 
+
 @layer base {
   :root {
     --background: 211 100% 95%;
@@ -135,4 +136,14 @@
 
 .btn-secondary {
   @apply bg-secondary text-secondary-foreground hover:bg-secondary/80;
+}
+
+/* Hide scrollbar but keep functionality */
+.scrollbar-none {
+  -ms-overflow-style: none;  /* IE and Edge */
+  scrollbar-width: none;  /* Firefox */
+}
+
+.scrollbar-none::-webkit-scrollbar {
+  display: none;  /* Chrome, Safari and Opera */
 }

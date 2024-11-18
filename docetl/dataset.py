@@ -1,9 +1,10 @@
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union, Literal
+from pydantic import BaseModel
 
 from docetl.parsing_tools import get_parser, get_parsing_tools
-from docetl.schemas import ParsingTool
+from docetl.base_schemas import ParsingTool
 
 
 def create_parsing_tool_map(
@@ -39,6 +40,40 @@ class Dataset:
         user_defined_parsing_tool_map (Dict[str, ParsingTool]): A map of user-defined parsing tools.
     """
 
+    class schema(BaseModel):
+        """
+        Represents a dataset configuration in the pipeline.
+
+        Attributes:
+            type (str): The type of the dataset. Must be either 'file' or 'memory'.
+            path (str): The path to the dataset file or the in-memory data, depending on the type.
+            source (str): The source of the dataset. Currently, only 'local' is supported. Defaults to 'local'.
+            parsing (Optional[List[Dict[str, str]]]): A list of parsing tools to apply to the data. Each parsing tool
+                                                      is represented by a dictionary with 'input_key', 'function', and
+                                                      'output_key' keys. Defaults to None.
+
+        Example:
+            ```yaml
+            datasets:
+              my_dataset:
+                type: file
+                path: input.json
+                parsing:
+                  - input_key: file_path
+                    function: txt_to_string
+                    output_key: content
+            ```
+
+        Note:
+            The parsing tools are applied in the order they are listed. Each parsing tool takes the output
+            of the previous tool as its input, allowing for chained processing of the data.
+        """
+
+        type: Literal["file", "memory"]
+        path: str
+        source: str = "local"
+        parsing: Optional[List[Dict[str, str]]] = None
+        
     def __init__(
         self,
         runner,
@@ -146,17 +181,12 @@ class Dataset:
             return []
 
         for tool in parsing_tools:
-            if (
-                not isinstance(tool, dict)
-                or "function" not in tool
-            ):
+            if not isinstance(tool, dict) or "function" not in tool:
                 raise ValueError(
                     "Each parsing tool must be a dictionary with a 'function' key and any arguments required by that function"
                 )
             if not isinstance(tool["function"], str):
-                raise ValueError(
-                    "'function' in parsing tools must be a string"
-                )
+                raise ValueError("'function' in parsing tools must be a string")
             if "function_kwargs" in tool and not isinstance(
                 tool["function_kwargs"], dict
             ):
@@ -212,7 +242,7 @@ class Dataset:
     ):
         result = func(item, **function_kwargs)
         return [item.copy() | res for res in result]
-        
+
     def _apply_parsing_tools(self, data: List[Dict]) -> List[Dict]:
         """
         Apply parsing tools to the data.
@@ -233,7 +263,7 @@ class Dataset:
             # with the existing yaml format...
             if "function_kwargs" in function_kwargs:
                 function_kwargs.update(function_kwargs.pop("function_kwargs"))
-            
+
             try:
                 func = get_parser(tool["function"])
             except KeyError:
@@ -243,7 +273,8 @@ class Dataset:
                 ):
                     # Define the custom function in the current scope
                     exec(
-                        self.user_defined_parsing_tool_map[
+                        "from typing import List, Dict\n"
+                        + self.user_defined_parsing_tool_map[
                             tool["function"]
                         ].function_code
                     )
@@ -313,11 +344,7 @@ class Dataset:
                         )
                     sampled_data = rd.sample(data, n)
                 else:
-                    sampled_data = []
-                    for i, line in enumerate(f):
-                        if i >= n:
-                            break
-                        sampled_data.append(json.loads(line))
+                    return json.load(f)[:n]
 
         elif ext == ".csv":
             import csv

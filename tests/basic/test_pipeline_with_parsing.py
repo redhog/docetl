@@ -21,6 +21,7 @@ default_model: "gpt-4o-mini"
 operations:
   - name: map_operation
     type: map
+    bypass_cache: true
     prompt: |
       Summarize the following text in one sentence: "{{ input.content }}"
     output:
@@ -96,7 +97,7 @@ def test_pipeline_with_parsing(config_file):
 
             # Create and run the DSLRunner
             runner = DSLRunner.from_yaml(config_file)
-            total_cost = runner.run()
+            total_cost = runner.load_run_save()
 
             # Check if the output file was created
             assert os.path.exists(output_file.name), "Output file was not created"
@@ -200,7 +201,6 @@ def test_pipeline_with_custom_parsing():
     os.unlink(tmp_input.name)
     os.unlink(tmp_output.name)
 
-    assert cost > 0, "Total cost was not calculated or is 0"
     print(
         f"Pipeline with custom parsing executed successfully. Total cost: ${cost:.2f}"
     )

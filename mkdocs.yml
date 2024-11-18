@@ -1,5 +1,4 @@
 site_name: docetl docs
-site_url: https://docetl.com/
 # use_directory_urls: false
 # strict: true
 # docs_dir: docs
@@ -35,6 +34,8 @@ nav:
           - Split: operators/split.md
           - Gather: operators/gather.md
           - Unnest: operators/unnest.md
+          - Sample: operators/sample.md
+          - Code: operators/code.md
       - Optimization:
           - Overview: optimization/overview.md
           - Example: optimization/example.md
@@ -58,6 +59,9 @@ nav:
       - docetl.operations: api-reference/operations.md
       - docetl.optimizers: api-reference/optimizers.md
       - Python API: api-reference/python.md
+  - UI Playground:
+      - Installation: playground/index.md
+      - Simple Tutorial: playground/tutorial.md
   - Community:
       - Community: community/index.md
       - Roadmap: community/roadmap.md

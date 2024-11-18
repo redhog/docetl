@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 from docetl.operations.base import BaseOperation
 
@@ -15,6 +15,14 @@ class GatherOperation(BaseOperation):
     5. Return results containing the rendered chunks with added context, including information about skipped characters and headers.
     """
 
+    class schema(BaseOperation.schema):
+        type: str = "gather"
+        content_key: str
+        doc_id_key: str
+        order_key: str
+        peripheral_chunks: Dict[str, Any]
+        doc_header_key: Optional[str] = None
+    
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """
         Initialize the GatherOperation.
@@ -40,12 +48,7 @@ class GatherOperation(BaseOperation):
                     f"Missing required key '{key}' in GatherOperation configuration"
                 )
 
-        if "peripheral_chunks" not in self.config:
-            raise ValueError(
-                "Missing 'peripheral_chunks' configuration in GatherOperation"
-            )
-
-        peripheral_config = self.config["peripheral_chunks"]
+        peripheral_config = self.config.get("peripheral_chunks", {})
         for direction in ["previous", "next"]:
             if direction not in peripheral_config:
                 continue
@@ -79,7 +82,7 @@ class GatherOperation(BaseOperation):
         content_key = self.config["content_key"]
         doc_id_key = self.config["doc_id_key"]
         order_key = self.config["order_key"]
-        peripheral_config = self.config["peripheral_chunks"]
+        peripheral_config = self.config.get("peripheral_chunks", {})
         main_chunk_start = self.config.get(
             "main_chunk_start", "--- Begin Main Chunk ---"
         )

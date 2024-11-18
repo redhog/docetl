@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Tuple
 
 from litellm import model_cost
 from rich.console import Console
+from rich.prompt import Prompt
 
 from docetl.optimizers.map_optimizer.utils import generate_and_validate_prompt
 from docetl.optimizers.utils import LLMClient
@@ -13,6 +14,7 @@ from docetl.utils import count_tokens, extract_jinja_variables, truncate_sample_
 class PromptGenerator:
     def __init__(
         self,
+        runner: "DSLRunner",
         llm_client: LLMClient,
         console: Console,
         config: Dict[str, Any],
@@ -24,6 +26,7 @@ class PromptGenerator:
         self.config = config
         self.max_threads = max_threads
         self.is_filter = is_filter
+        self.runner = runner
 
     def _generate_validator_prompt(
         self,
@@ -69,8 +72,8 @@ class PromptGenerator:
         Task Prompt: {op_config.get('prompt', 'N/A')}
 
         Based on this information, create a custom validator prompt that will assess how well the original task was performed. The prompt should ask 2 or 3 specific questions about the quality and completeness of the output, such as:
-        1. Are there any instances of the target information missed?
-        2. Would the output improve if the input was analyzed more carefully?
+        1. Recall-oriented; if the prompt asks for all instances of a target information, the validator prompt should ask if all instances were found?
+        2. Would the output significantly improve if the input was analyzed more carefully?
         3. Is the output format correct and consistent?
         4. Are there any errors or inconsistencies in the extracted information?
 
@@ -189,7 +192,7 @@ class PromptGenerator:
 
         header_extraction_prompt = f"""Analyze the following chunk of a document and extract any headers you see.
 
-        {{ input.{split_key}_chunk }}
+        {{{{ input.{split_key}_chunk }}}}
 
         Examples of headers and their levels based on the document structure:
         {chr(10).join(header_examples)}
@@ -328,15 +331,41 @@ class PromptGenerator:
         {sample_inputs}
 
         Modify the original prompt to be a prompt that will combine these chunk results to accomplish the original task.
+        This prompt will be submitted to an LLM, so it must be a valid Jinja2 template, with natural language instructions.
 
         Guidelines for your prompt template:
-        - The only variable you are allowed to use is the inputs variable, which contains all chunk results. Each value is a dictionary with the keys {', '.join(schema_keys)}
-        - Avoid using filters or complex logic, even though Jinja technically supports it
+        - The only variable you are allowed to use is the `inputs` variable, which contains all chunk results. Each value is a dictionary with the keys {', '.join(schema_keys)}
+        - Avoid using filters or complex logic like `do` statements, even though Jinja technically supports it
         - The prompt template must be a valid Jinja2 template
-        - You must use the {{ inputs }} variable somehow (you can access specific schema keys if you'ld like)
+        - You must use the {{{{ inputs }}}} variable somehow, in a for loop. You must access specific keys in each item in the loop.
+        - The prompt template must also contain natural language instructions so the LLM knows what to do with the data
 
         Provide your prompt template as a single string.
         """
+        # Add example for combining themes
+        base_prompt += """
+        Example of a good combine prompt for combining themes:
+        ```
+        You are tasked with combining themes extracted from different chunks of text.
+
+        Here are the themes extracted from each chunk:
+        {% for item in inputs %}
+        Themes for chunk {loop.index}:
+        {{ item.themes }}
+        {% endfor %}
+
+        Analyze all the themes above and create a consolidated list that:
+        1. Combines similar or related themes
+        2. Preserves unique themes that appear in only one chunk
+        3. Prioritizes themes that appear multiple times across chunks
+        4. Maintains the original wording where possible
+
+        Provide the final consolidated list of themes, ensuring each theme is distinct and meaningful.
+        ```
+
+        Now generate a combine prompt for the current task.
+        """
+
         parameters = {
             "type": "object",
             "properties": {"combine_prompt": {"type": "string"}},
@@ -353,8 +382,22 @@ class PromptGenerator:
             config=self.config,
             max_threads=self.max_threads,
             console=self.console,
+            inclusion_strings=["inputs"],
         )
         combine_prompt = result["combine_prompt"]
+
+        # Confirm with the user that this prompt is good & ask them to edit
+        # if self.runner.status:
+        #     self.runner.status.stop()
+
+        # combine_prompt = Prompt.ask(
+        #     f"Here is the prompt generated for the reduce operation:\n```\n{combine_prompt}\n```\n\nPress enter to confirm, or type in the prompt you would like to use instead.",
+        #     default=combine_prompt,
+        #     console=self.console,
+        # )
+
+        # if self.runner.status:
+        #     self.runner.status.start()
 
         # Determine if the combine operation is associative
         system_prompt_associative = (

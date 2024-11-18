@@ -1,11 +1,13 @@
+import datetime
 import os
+from docetl.console import get_console
 from docetl.utils import load_config
 from typing import Any, Dict, List, Optional, Tuple, Union
 from docetl.operations.utils import APIWrapper
-from rich.console import Console
 import pyrate_limiter
 from inspect import isawaitable
 import math
+from rich.console import Console
 
 
 class BucketCollection(pyrate_limiter.BucketFactory):
@@ -31,15 +33,42 @@ class BucketCollection(pyrate_limiter.BucketFactory):
 
 
 class ConfigWrapper(object):
+
     @classmethod
     def from_yaml(cls, yaml_file: str, **kwargs):
-        config = load_config(yaml_file)
-        return cls(config, **kwargs)
+        # check that file ends with .yaml or .yml
+        if not yaml_file.endswith(".yaml") and not yaml_file.endswith(".yml"):
+            raise ValueError(
+                "Invalid file type. Please provide a YAML file ending with '.yaml' or '.yml'."
+            )
 
-    def __init__(self, config: Dict, max_threads: int = None):
+        base_name = yaml_file.rsplit(".", 1)[0]
+        suffix = yaml_file.split("/")[-1].split(".")[0]
+        config = load_config(yaml_file)
+        return cls(config, base_name=base_name, yaml_file_suffix=suffix, **kwargs)
+
+    def __init__(
+        self,
+        config: Dict,
+        base_name: Optional[str] = None,
+        yaml_file_suffix: Optional[str] = None,
+        max_threads: int = None,
+        console: Optional[Console] = None,
+    ):
         self.config = config
+        self.base_name = base_name
+        self.yaml_file_suffix = yaml_file_suffix or datetime.datetime.now().strftime(
+            "%Y%m%d_%H%M%S"
+        )
         self.default_model = self.config.get("default_model", "gpt-4o-mini")
-        self.console = Console()
+        if console:
+            self.console = console
+        else:
+            # Reset the DOCETL_CONSOLE
+            global DOCETL_CONSOLE
+            DOCETL_CONSOLE = get_console()
+
+            self.console = DOCETL_CONSOLE
         self.max_threads = max_threads or (os.cpu_count() or 1) * 4
         self.status = None
 

@@ -8,6 +8,7 @@ from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
+from docetl.utils import CapturedOutput
 from rich.console import Console
 from rich.status import Status
 from rich.traceback import install
@@ -77,27 +78,11 @@ class DatasetOnDisk(dict):
         return [(key, self[key]) for key in self.keys()]
 
 
-class Optimizer(ConfigWrapper):
-    @classmethod
-    def from_yaml(cls, yaml_file: str, **kwargs):
-        # check that file ends with .yaml or .yml
-        if not yaml_file.endswith(".yaml") and not yaml_file.endswith(".yml"):
-            raise ValueError(
-                "Invalid file type. Please provide a YAML file ending with '.yaml' or '.yml'."
-            )
-
-        base_name = yaml_file.rsplit(".", 1)[0]
-        suffix = yaml_file.split("/")[-1].split(".")[0]
-        return super(Optimizer, cls).from_yaml(
-            yaml_file, base_name=base_name, yaml_file_suffix=suffix, **kwargs
-        )
+class Optimizer:
 
     def __init__(
         self,
-        config: Dict,
-        base_name: str,
-        yaml_file_suffix: str,
-        max_threads: Optional[int] = None,
+        runner: "DSLRunner",
         model: str = "gpt-4o",
         resume: bool = False,
         timeout: int = 60,
@@ -136,7 +121,16 @@ class Optimizer(ConfigWrapper):
 
         The method also calls print_optimizer_config() to display the initial configuration.
         """
-        ConfigWrapper.__init__(self, config, max_threads)
+        self.config = runner.config
+        self.console = runner.console
+        self.max_threads = runner.max_threads
+
+        self.base_name = runner.base_name
+        self.yaml_file_suffix = runner.yaml_file_suffix
+        self.config = runner.config
+        self.runner = runner
+        self.status = runner.status
+
         self.optimized_config = copy.deepcopy(self.config)
         self.llm_client = LLMClient(model)
         self.operations_cost = 0
@@ -144,18 +138,13 @@ class Optimizer(ConfigWrapper):
         self.selectivities = defaultdict(dict)
         self.samples_taken = defaultdict(dict)
         self.resume = resume
-
-        # create parsing tool map
-        self.parsing_tool_map = create_parsing_tool_map(
-            self.config.get("parsing_tools", None)
-        )
+        self.captured_output = CapturedOutput()
 
         home_dir = os.path.expanduser("~")
-        cache_dir = os.path.join(home_dir, f".docetl/cache/{yaml_file_suffix}")
+        cache_dir = os.path.join(home_dir, f".docetl/cache/{runner.yaml_file_suffix}")
         os.makedirs(cache_dir, exist_ok=True)
         self.datasets = DatasetOnDisk(dir=cache_dir, console=self.console)
         self.optimized_ops_path = f"{cache_dir}/optimized_ops"
-        self.optimized_config_path = f"{base_name}_opt.yaml"
 
         # Update sample size map
         self.sample_size_map = SAMPLE_SIZE_MAP
@@ -191,7 +180,7 @@ class Optimizer(ConfigWrapper):
             try:
                 operation_class = get_operation(operation_type)
                 operation_class(
-                    self,
+                    self.runner,
                     operation_config,
                     self.config.get("default_model", "gpt-4o-mini"),
                     self.max_threads,
@@ -331,8 +320,12 @@ class Optimizer(ConfigWrapper):
                     has_map = True
                     map_op = op
                 elif op_type == "reduce" and op_config.get("synthesize_resolve", True):
-                    has_reduce = True
-                    reduce_op = op
+                    reduce_key = op_config.get("reduce_key", "_all")
+                    if isinstance(reduce_key, str):
+                        reduce_key = [reduce_key]
+                    if "_all" not in reduce_key:
+                        has_reduce = True
+                        reduce_op = op
                 elif op_type == "resolve":
                     has_resolve = True
 
@@ -486,7 +479,98 @@ class Optimizer(ConfigWrapper):
         else:
             self.console.log("[yellow]No optimized operations found[/yellow]")
 
-    def optimize(self):
+    def should_optimize(self, step_name: str, op_name: str) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]], float]:
+        """
+        Determine if an operation should be optimized.
+        We do this by running the operations on a sample of the input data and checking if the output is correct.
+        """
+        self.console.rule("[bold cyan]Beginning Pipeline Optimization[/bold cyan]")
+        self.syntax_check()
+
+        self._insert_empty_resolve_operations()
+
+        for step in self.config["pipeline"]["steps"]:
+            self.captured_output.set_step(step.get("name"))
+            # Go through each operation in the step until we find the one we want to optimize
+            ops_run = []
+            op_name_to_object = {name: self.find_operation(name) for name in step["operations"]}
+            for op_idx, operation in enumerate(step["operations"]):
+                if isinstance(operation, dict):
+                    operation_name = list(operation.keys())[0]
+                    operation_config = operation[operation_name]
+                else:
+                    operation_name = operation
+                    operation_config = {}
+
+                op_object = self.find_operation(operation_name).copy()
+                op_object.update(operation_config)
+                op_object["name"] = operation_name
+
+                # Run the pipeline
+                sample_size = self.compute_sample_size(
+                    step.get("name"), step.get("operations"), op_object
+                )
+                input_data = self._run_partial_step(
+                    step, ops_run, sample_size, op_name_to_object
+                )
+                output_data = input_data
+
+                # If this is not the operation we want to optimize, just execute it and add to selectivities
+                if f"{step.get('name')}/{op_name}" != f"{step_name}/{op_name}" and op_object.get("empty", False):
+                    output_data = self._run_operation(op_object, input_data, is_build=True)
+                    self.selectivities[step.get("name")][op_name] = len(output_data) / len(input_data)
+                    ops_run.append(op_name)
+
+                # if this is the operation we want to optimize, invoke the optimizer's should_optimize method
+                else:
+                    if op_object.get("type") == "map" or op_object.get("type") == "filter":
+                        # Create instance of map optimizer
+                        map_optimizer = MapOptimizer(
+                            self,
+                            self.config,
+                            self.console,
+                            self.llm_client,
+                            self.max_threads,
+                            self._run_operation,
+                            timeout=self.timeout,
+                            is_filter=op_object.get("type") == "filter",
+                        )
+                        should_optimize_output, input_data, output_data = map_optimizer.should_optimize(op_object, input_data)
+                    elif op_object.get("type") == "reduce":
+                        reduce_optimizer = ReduceOptimizer(
+                            self.runner,
+                            self.config,
+                            self.console,
+                            self.llm_client,
+                            self.max_threads,
+                            self._run_operation,
+                        )
+                        should_optimize_output, input_data, output_data = reduce_optimizer.should_optimize(op_object, input_data)
+                    elif op_object.get("type") == "resolve":
+                        resolve_optimizer = JoinOptimizer(
+                            self.runner,
+                            self.config,
+                            op_object,
+                            self.console,
+                            self.llm_client,
+                            self.max_threads,
+                            target_recall=self.config.get("optimizer_config", {})
+                            .get("resolve", {})
+                            .get("target_recall", 0.95),
+                        )
+                        _, should_optimize_output = resolve_optimizer.should_optimize(input_data)
+
+                        # if should_optimize_output is empty, then we should move to the reduce operation
+                        if should_optimize_output == "":
+                            continue
+
+                    # Return the string and operation cost
+                    return should_optimize_output, input_data, output_data, self.operations_cost + self.llm_client.total_cost
+        
+        # Should not get here
+        raise ValueError("No operation to optimize found")
+
+    def optimize(self) -> float:
         """
         Optimize the entire pipeline defined in the configuration.
 
@@ -614,6 +698,8 @@ class Optimizer(ConfigWrapper):
             f"[bold]Total cost: ${self.llm_client.total_cost + self.operations_cost:.2f}[/bold]"
         )
 
+        return self.llm_client.total_cost + self.operations_cost
+
     def _run_partial_step(
         self,
         step: Dict[str, Any],
@@ -715,6 +801,7 @@ class Optimizer(ConfigWrapper):
         Raises:
             ValueError: If an unsupported operation type is encountered.
         """
+        self.captured_output.set_step(step.get("name"))
         optimized_operations = {}
         optimized_operation_names = []
         replacement_operations = {}  # List from old op name to new ops
@@ -976,7 +1063,7 @@ class Optimizer(ConfigWrapper):
                 type=dataset_config["type"],
                 path_or_data=dataset_config["path"],
                 parsing=dataset_config.get("parsing", []),
-                user_defined_parsing_tool_map=self.parsing_tool_map,
+                user_defined_parsing_tool_map=self.runner.parsing_tool_map,
             )
             data = dataset.load()
 
@@ -988,6 +1075,9 @@ class Optimizer(ConfigWrapper):
                 return self._get_reduce_sample(
                     data, op_config.get("reduce_key"), sample_size
                 )
+            
+        if not self.config.get("optimizer_config", {}).get("random_sample", False):
+            return data[:sample_size]
 
         # Take the random 500 examples or all if less than 500
         initial_data = random.sample(data, min(500, len(data)))
@@ -1046,7 +1136,13 @@ class Optimizer(ConfigWrapper):
             group_sample_size = int(sample_size * group_proportion)
 
             # Sample from the group
-            group_sample = random.sample(items, min(group_sample_size, len(items)))
+            if not self.config.get("optimizer_config", {}).get("random_sample", False):
+                group_sample = items[:group_sample_size]
+            else:
+                group_sample = random.sample(
+                    items, min(group_sample_size, len(items))
+                )
+
             sample.extend(group_sample)
 
         # If we haven't reached the desired sample size, add more items randomly
@@ -1059,22 +1155,10 @@ class Optimizer(ConfigWrapper):
             ]
             additional_sample = random.sample(
                 remaining_items,
-                min(sample_size - len(sample), len(remaining_items)),
-            )
-            sample.extend(additional_sample)
-
-        # Add items randomly from non-top groups to meet the sample size
-        if len(sample) < sample_size:
-            remaining_items = [
-                item
-                for _, items in grouped_data.items()
-                for item in items
-                if item not in sample
-            ]
-            additional_sample = random.sample(
-                remaining_items,
-                min(sample_size - len(sample), len(remaining_items)),
-            )
+                min(
+                    sample_size - len(sample), len(remaining_items)
+                ),
+            ) if self.config.get("optimizer_config", {}).get("random_sample", False) else remaining_items[:sample_size - len(sample)]
             sample.extend(additional_sample)
 
         # Create a histogram of group sizes
@@ -1115,7 +1199,7 @@ class Optimizer(ConfigWrapper):
             List[Dict[str, Any]]: The optimized operation configuration.
         """
         reduce_optimizer = ReduceOptimizer(
-            self,
+            self.runner,
             self.config,
             self.console,
             self.llm_client,
@@ -1158,7 +1242,7 @@ class Optimizer(ConfigWrapper):
         new_right_name = right_name
         for _ in range(max_iterations):
             join_optimizer = JoinOptimizer(
-                self,
+                self.runner,
                 self.config,
                 op_config,
                 self.console,
@@ -1209,7 +1293,7 @@ class Optimizer(ConfigWrapper):
             if map_operation["optimize"]:
                 dataset_to_transform_sample = random.sample(
                     dataset_to_transform, self.sample_size_map.get("map")
-                )
+                ) if self.config.get("optimizer_config", {}).get("random_sample", False) else dataset_to_transform[:self.sample_size_map.get("map")]
                 optimized_map_operations = self._optimize_map(
                     map_operation, dataset_to_transform_sample
                 )
@@ -1279,6 +1363,7 @@ class Optimizer(ConfigWrapper):
         Returns:
             List[Dict[str, Any]]: The optimized operation configuration.
         """
+
         map_optimizer = MapOptimizer(
             self,
             self.config,
@@ -1310,7 +1395,7 @@ class Optimizer(ConfigWrapper):
             List[Dict[str, Any]]: The optimized operation configuration.
         """
         optimized_config, cost = JoinOptimizer(
-            self,
+            self.runner,
             self.config,
             op_config,
             self.console,
@@ -1358,7 +1443,7 @@ class Optimizer(ConfigWrapper):
         operation_class = get_operation(op_config["type"])
 
         oc_kwargs = {
-            "runner": self,
+            "runner": self.runner,
             "config": op_config,
             "default_model": self.config["default_model"],
             "max_threads": self.max_threads,
@@ -1418,7 +1503,7 @@ class Optimizer(ConfigWrapper):
 
         return resolved_config
 
-    def save_optimized_config(self):
+    def save_optimized_config(self, optimized_config_path: str):
         """
         Save the optimized configuration to a YAML file.
 
@@ -1427,10 +1512,10 @@ class Optimizer(ConfigWrapper):
         """
         resolved_config = self.clean_optimized_config()
 
-        with open(self.optimized_config_path, "w") as f:
+        with open(optimized_config_path, "w") as f:
             yaml.safe_dump(resolved_config, f, default_flow_style=False, width=80)
             self.console.log(
-                f"[green italic]💾 Optimized config saved to {self.optimized_config_path}[/green italic]"
+                f"[green italic]💾 Optimized config saved to {optimized_config_path}[/green italic]"
             )
 
 

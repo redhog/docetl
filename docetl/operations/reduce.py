@@ -12,7 +12,7 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import jinja2
 import numpy as np
@@ -25,6 +25,7 @@ from docetl.operations.clustering_utils import (
 )
 from docetl.operations.utils import rich_as_completed
 from docetl.utils import completion_cost
+from pydantic import Field
 
 
 class ReduceOperation(BaseOperation):
@@ -34,6 +35,24 @@ class ReduceOperation(BaseOperation):
     This class extends BaseOperation to provide functionality for reducing grouped data
     using various strategies including batch reduce, incremental reduce, and parallel fold and merge.
     """
+
+    class schema(BaseOperation.schema):
+        type: str = "reduce"
+        reduce_key: Union[str, List[str]]
+        output: Optional[Dict[str, Any]] = None
+        prompt: Optional[str] = None
+        optimize: Optional[bool] = None
+        synthesize_resolve: Optional[bool] = None
+        model: Optional[str] = None
+        input: Optional[Dict[str, Any]] = None
+        pass_through: Optional[bool] = None
+        associative: Optional[bool] = None
+        fold_prompt: Optional[str] = None
+        fold_batch_size: Optional[int] = None
+        value_sampling: Optional[Dict[str, Any]] = None
+        verbose: Optional[bool] = None
+        timeout: Optional[int] = None
+        litellm_completion_kwargs: Dict[str, Any] = Field(default_factory=dict)
 
     def __init__(self, *args, **kwargs):
         """
@@ -55,6 +74,7 @@ class ReduceOperation(BaseOperation):
             else self.config["reduce_key"]
         )
         self.intermediates = {}
+        self.lineage_keys = self.config.get("output", {}).get("lineage", [])
 
     def syntax_check(self) -> None:
         """
@@ -258,6 +278,19 @@ class ReduceOperation(BaseOperation):
                             f"'embedding_keys' is required when using embedding-based sampling in {self.config['name']}"
                         )
 
+        # Check if lineage is a list of strings
+        if "lineage" in self.config.get("output", {}):
+            if not isinstance(self.config["output"]["lineage"], list):
+                raise TypeError(
+                    f"'lineage' in {self.config['name']} 'output' configuration must be a list"
+                )
+            if not all(
+                isinstance(key, str) for key in self.config["output"]["lineage"]
+            ):
+                raise TypeError(
+                    f"All elements in 'lineage' list in {self.config['name']} 'output' configuration must be strings"
+                )
+
         self.gleaning_check()
 
     def execute(self, input_data: List[Dict]) -> Tuple[List[Dict], float]:
@@ -292,7 +325,15 @@ class ReduceOperation(BaseOperation):
         else:
             # Group the input data by the reduce key(s) while maintaining original order
             def get_group_key(item):
-                return tuple(item[key] for key in reduce_keys)
+                key_values = []
+                for key in reduce_keys:
+                    value = item[key]
+                    # Special handling for list-type values
+                    if isinstance(value, list):
+                        key_values.append(tuple(sorted(value)))  # Convert list to sorted tuple
+                    else:
+                        key_values.append(value)
+                return tuple(key_values)
 
             grouped_data = {}
             for item in input_data:
@@ -346,12 +387,22 @@ class ReduceOperation(BaseOperation):
             # Only execute merge-based plans if associative = True
             if "merge_prompt" in self.config and self.config.get("associative", True):
                 result, cost = self._parallel_fold_and_merge(key, group_list)
+            elif (
+                self.config.get("fold_batch_size", None)
+                and self.config.get("fold_batch_size") >= len(group_list)
+            ):
+                # If the fold batch size is greater than or equal to the number of items in the group,
+                # we can just run a single fold operation
+                result, cost = self._batch_reduce(key, group_list)
             elif "fold_prompt" in self.config:
                 result, cost = self._incremental_reduce(key, group_list)
             else:
                 result, cost = self._batch_reduce(key, group_list)
 
             total_cost += cost
+
+            # Add the counts of items in the group to the result
+            result[f"_counts_prereduce_{self.config['name']}"] = len(group_elems)
 
             # Apply pass-through at the group level
             if (
@@ -362,6 +413,17 @@ class ReduceOperation(BaseOperation):
                 for k, v in group_elems[0].items():
                     if k not in self.config["output"]["schema"] and k not in result:
                         result[k] = v
+
+            # Add lineage information
+            if result is not None and self.lineage_keys:
+                lineage = []
+                for item in group_elems:
+                    lineage_item = {
+                        k: item.get(k) for k in self.lineage_keys if k in item
+                    }
+                    if lineage_item:
+                        lineage.append(lineage_item)
+                result[f"{self.config['name']}_lineage"] = lineage
 
             return result, total_cost
 
@@ -404,7 +466,7 @@ class ReduceOperation(BaseOperation):
             return group_list, 0
 
         clusters, cost = cluster_documents(
-            group_list, value_sampling, sample_size, self.api
+            group_list, value_sampling, sample_size, self.runner.api
         )
 
         sampled_items = []
@@ -444,7 +506,7 @@ class ReduceOperation(BaseOperation):
         )
 
         embeddings, cost = get_embeddings_for_clustering(
-            group_list, value_sampling, self.api
+            group_list, value_sampling, self.runner.api
         )
 
         query_response = self.runner.api.gen_embedding(embedding_model, [query_text])
@@ -684,6 +746,15 @@ class ReduceOperation(BaseOperation):
 
         return current_output, total_cost
 
+    def validation_fn(self, response: Dict[str, Any]):
+        output = self.runner.api.parse_llm_response(
+            response,
+            schema=self.config["output"]["schema"],
+        )[0]
+        if self.runner.api.validate_output(self.config, output, self.console):
+            return output, True
+        return output, False
+
     def _increment_fold(
         self,
         key: Tuple,
@@ -715,29 +786,44 @@ class ReduceOperation(BaseOperation):
             output=current_output,
             reduce_key=dict(zip(self.config["reduce_key"], key)),
         )
+
         response = self.runner.api.call_llm(
             self.config.get("model", self.default_model),
             "reduce",
             [{"role": "user", "content": fold_prompt}],
             self.config["output"]["schema"],
             scratchpad=scratchpad,
-            console=self.console,
             timeout_seconds=self.config.get("timeout", 120),
             max_retries_per_timeout=self.config.get("max_retries_per_timeout", 2),
+            validation_config=(
+                {
+                    "num_retries": self.num_retries_on_validate_failure,
+                    "val_rule": self.config.get("validate", []),
+                    "validation_fn": self.validation_fn,
+                }
+                if self.config.get("validate", None)
+                else None
+            ),
+            bypass_cache=self.config.get("bypass_cache", False),
+            verbose=self.config.get("verbose", False),
+            litellm_completion_kwargs=self.config.get("litellm_completion_kwargs", {}),
         )
-        folded_output = self.runner.api.parse_llm_response(
-            response,
-            self.config["output"]["schema"],
-            manually_fix_errors=self.manually_fix_errors,
-        )[0]
 
-        folded_output.update(dict(zip(self.config["reduce_key"], key)))
-        fold_cost = completion_cost(response)
         end_time = time.time()
         self._update_fold_time(end_time - start_time)
 
-        if self.runner.api.validate_output(self.config, folded_output, self.console):
+        if response.validated:
+            folded_output = self.runner.api.parse_llm_response(
+                response.response,
+                schema=self.config["output"]["schema"],
+                manually_fix_errors=self.manually_fix_errors,
+            )[0]
+
+            folded_output.update(dict(zip(self.config["reduce_key"], key)))
+            fold_cost = response.total_cost
+
             return folded_output, fold_cost
+
         return None, fold_cost
 
     def _merge_results(
@@ -766,20 +852,35 @@ class ReduceOperation(BaseOperation):
             "merge",
             [{"role": "user", "content": merge_prompt}],
             self.config["output"]["schema"],
-            console=self.console,
             timeout_seconds=self.config.get("timeout", 120),
             max_retries_per_timeout=self.config.get("max_retries_per_timeout", 2),
+            validation_config=(
+                {
+                    "num_retries": self.num_retries_on_validate_failure,
+                    "val_rule": self.config.get("validate", []),
+                    "validation_fn": self.validation_fn,
+                }
+                if self.config.get("validate", None)
+                else None
+            ),
+            bypass_cache=self.config.get("bypass_cache", False),
+            verbose=self.config.get("verbose", False),
+            litellm_completion_kwargs=self.config.get("litellm_completion_kwargs", {}),
         )
-        merged_output = self.runner.api.parse_llm_response(
-            response, self.config["output"]["schema"]
-        )[0]
-        merged_output.update(dict(zip(self.config["reduce_key"], key)))
-        merge_cost = completion_cost(response)
+
         end_time = time.time()
         self._update_merge_time(end_time - start_time)
 
-        if self.runner.api.validate_output(self.config, merged_output, self.console):
+        if response.validated:
+            merged_output = self.runner.api.parse_llm_response(
+                response.response,
+                schema=self.config["output"]["schema"],
+                manually_fix_errors=self.manually_fix_errors,
+            )[0]
+            merged_output.update(dict(zip(self.config["reduce_key"], key)))
+            merge_cost = response.total_cost
             return merged_output, merge_cost
+
         return None, merge_cost
 
     def get_fold_time(self) -> Tuple[float, bool]:
@@ -854,41 +955,38 @@ class ReduceOperation(BaseOperation):
         )
         item_cost = 0
 
-        if "gleaning" in self.config:
-            response, gleaning_cost = self.runner.api.call_llm_with_gleaning(
-                self.config.get("model", self.default_model),
-                "reduce",
-                [{"role": "user", "content": prompt}],
-                self.config["output"]["schema"],
-                self.config["gleaning"]["validation_prompt"],
-                self.config["gleaning"]["num_rounds"],
-                console=self.console,
-                timeout_seconds=self.config.get("timeout", 120),
-                max_retries_per_timeout=self.config.get("max_retries_per_timeout", 2),
-                verbose=self.config.get("verbose", False),
-            )
-            item_cost += gleaning_cost
-        else:
-            response = self.runner.api.call_llm(
-                self.config.get("model", self.default_model),
-                "reduce",
-                [{"role": "user", "content": prompt}],
-                self.config["output"]["schema"],
-                console=self.console,
-                scratchpad=scratchpad,
-                timeout_seconds=self.config.get("timeout", 120),
-                max_retries_per_timeout=self.config.get("max_retries_per_timeout", 2),
-            )
-
-        item_cost += completion_cost(response)
-
-        output = self.runner.api.parse_llm_response(
-            response,
+        response = self.runner.api.call_llm(
+            self.config.get("model", self.default_model),
+            "reduce",
+            [{"role": "user", "content": prompt}],
             self.config["output"]["schema"],
-            manually_fix_errors=self.manually_fix_errors,
-        )[0]
-        output.update(dict(zip(self.config["reduce_key"], key)))
+            scratchpad=scratchpad,
+            timeout_seconds=self.config.get("timeout", 120),
+            max_retries_per_timeout=self.config.get("max_retries_per_timeout", 2),
+            bypass_cache=self.config.get("bypass_cache", False),
+            validation_config=(
+                {
+                    "num_retries": self.num_retries_on_validate_failure,
+                    "val_rule": self.config.get("validate", []),
+                    "validation_fn": self.validation_fn,
+                }
+                if self.config.get("validate", None)
+                else None
+            ),
+            gleaning_config=self.config.get("gleaning", None),
+            verbose=self.config.get("verbose", False),
+            litellm_completion_kwargs=self.config.get("litellm_completion_kwargs", {}),
+        )
 
-        if self.runner.api.validate_output(self.config, output, self.console):
+        item_cost += response.total_cost
+
+        if response.validated:
+            output = self.runner.api.parse_llm_response(
+                response.response,
+                schema=self.config["output"]["schema"],
+                manually_fix_errors=self.manually_fix_errors,
+            )[0]
+            output.update(dict(zip(self.config["reduce_key"], key)))
+
             return output, item_cost
         return None, item_cost

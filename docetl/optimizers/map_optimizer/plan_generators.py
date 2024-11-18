@@ -17,6 +17,7 @@ from docetl.utils import extract_jinja_variables
 class PlanGenerator:
     def __init__(
         self,
+        runner,
         llm_client: LLMClient,
         console: Console,
         config: Dict[str, Any],
@@ -34,7 +35,7 @@ class PlanGenerator:
         )
         self._run_operation = run_operation
         self.prompt_generator = PromptGenerator(
-            llm_client, console, config, max_threads, is_filter
+            runner, llm_client, console, config, max_threads, is_filter
         )
         self.max_threads = max_threads
         self.config = config
@@ -773,16 +774,11 @@ class PlanGenerator:
         Note:
             - This method is most effective when the original task has multiple output keys
               with dependencies between them.
-            - If the output schema has only one key, an empty dictionary is returned as
-              chain decomposition is not necessary.
             - The method uses the LLM to generate the chain of subtasks, ensuring that
               all output keys from the original task are covered.
         """
 
         output_schema = op_config["output"]["schema"]
-        if len(output_schema) <= 1:
-            return {}  # No need for chain decomposition if there's only one output key
-
         variables_in_prompt = extract_jinja_variables(op_config["prompt"])
         variables_in_prompt = [v.replace("input.", "") for v in variables_in_prompt]
 

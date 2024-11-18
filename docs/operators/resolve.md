@@ -122,11 +122,13 @@ After determining eligible pairs for comparison, the Resolve operation uses a Un
 | `blocking_conditions`     | List of conditions for initial blocking                                           | []                            |
 | `input`                   | Specifies the schema or keys to subselect from each item to pass into the prompts | All keys from input items     |
 | `embedding_batch_size`    | The number of entries to send to the embedding model at a time                    | 1000                          |
-| `compare_batch_size`      | The number of entity pairs processed in each batch during the comparison phase    | 100                           |
+| `compare_batch_size`      | The number of entity pairs processed in each batch during the comparison phase    | 500                           |
 | `limit_comparisons`       | Maximum number of comparisons to perform                                          | None                          |
 | `timeout`                 | Timeout for each LLM call in seconds                                              | 120                           |
 | `max_retries_per_timeout` | Maximum number of retries per timeout                                             | 2                             |
-| `sample`                  | Number of samples to use for the operation                                                      | None                        |
+| `sample`                  | Number of samples to use for the operation                                                      |   None                        |
+| `litellm_completion_kwargs` | Additional parameters to pass to LiteLLM completion calls. | {}                          |
+
 ## Best Practices
 
 1. **Anticipate Resolve Needs**: If you anticipate needing a Resolve operation and want to control the prompts, create it in your pipeline and let the optimizer find the appropriate blocking rules and thresholds.

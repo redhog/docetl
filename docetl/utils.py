@@ -1,12 +1,50 @@
 import json
 import re
 from typing import Any, Dict, List
-
+from enum import Enum
 import tiktoken
 import yaml
 from jinja2 import Environment, meta
 from litellm import completion_cost as lcc
 
+
+class StageType(Enum):
+    SAMPLE_RUN = "sample_run"
+    SHOULD_OPTIMIZE = "should_optimize"
+    CANDIDATE_PLANS = "candidate_plans"
+    EVALUATION_RESULTS = "evaluation_results"
+    END = "end"
+
+def get_stage_description(stage_type: StageType) -> str:
+    if stage_type == StageType.SAMPLE_RUN:
+        return "Running samples..."
+    elif stage_type == StageType.SHOULD_OPTIMIZE:
+        return "Checking if optimization is needed..."
+    elif stage_type == StageType.CANDIDATE_PLANS:
+        return "Generating candidate plans..."
+    elif stage_type == StageType.EVALUATION_RESULTS:
+        return "Evaluating candidate plans..."
+    elif stage_type == StageType.END:
+        return "Optimization complete!"
+    raise ValueError(f"Unknown stage type: {stage_type}")
+
+class CapturedOutput:
+    def __init__(self):
+        self.optimizer_output = {}
+        self.step = None
+        
+    def set_step(self, step: str):
+        self.step = step
+    
+    def save_optimizer_output(self, stage_type: StageType, output: Any):
+        if self.step is None:
+            raise ValueError("Step must be set before saving optimizer output")
+
+        # Save this to a file
+        if self.step not in self.optimizer_output:
+            self.optimizer_output[self.step] = {}
+
+        self.optimizer_output[self.step][stage_type] = output
 
 def extract_jinja_variables(template_string: str) -> List[str]:
     """
@@ -152,3 +190,11 @@ def truncate_sample_data(
                     return truncated_data
 
     return truncated_data
+
+
+
+class classproperty(object):
+    def __init__(self, f):
+        self.f = f
+    def __get__(self, obj, owner):
+        return self.f(owner)
