@@ -15,6 +15,7 @@ from docetl.dataset import Dataset
 from docetl.operations import get_operation
 from docetl.operations.utils import flush_cache
 from docetl.optimizers import JoinOptimizer, MapOptimizer, ReduceOptimizer
+from docetl.storage import canonical_json_hash
 from docetl.utils import smart_sample
 
 if TYPE_CHECKING:
@@ -423,7 +424,7 @@ class OpContainer:
 
     def next(
         self, is_build: bool = False, sample_size_needed: int = None
-    ) -> tuple[list[dict], float, str]:
+    ) -> tuple[list[dict], float, str, str]:
         """
         Execute this operation and return its results. This is the core method implementing
         the pull-based execution model.
@@ -436,10 +437,11 @@ class OpContainer:
         5. Cache results if checkpointing is enabled
 
         Returns:
-            tuple[list[dict], float, str]: A tuple containing:
+            tuple[list[dict], float, str, str]: A tuple containing:
                 - The operation's output data
                 - Total cost of this operation and its children
                 - Execution logs as a formatted string
+                - SHA-256 hex hash of the output data (content-addressed cache key)
         """
         # Track cost and logs for this operation and its children
         input_data = None
@@ -447,6 +449,7 @@ class OpContainer:
         this_op_cost = 0.0
         curr_logs = ""
         input_len = None
+        upstream_data_hash: str | None = None
 
         # If this is a build operation, check the sample cache first
         if is_build:
@@ -462,17 +465,17 @@ class OpContainer:
                     if sample_size_needed:
                         cached_data = smart_sample(cached_data, sample_size_needed)
 
-                    return cached_data, 0, curr_logs
+                    return cached_data, 0, curr_logs, canonical_json_hash(cached_data)
 
         # Try to load from checkpoint if available
         # Skip if this operation has bypass_cache: true
         if not is_build and not self.config.get("bypass_cache", False):
-            attempted_input_data = self.runner._load_from_checkpoint_if_exists(
+            attempted_input_data, attempted_hash = self.runner._load_from_checkpoint_if_exists(
                 self.name.split("/")[0], self.name.split("/")[-1]
             )
             if attempted_input_data is not None:
                 curr_logs += f"[green]✓[/green] Using cached {self.name}\n"
-                return attempted_input_data, 0, curr_logs
+                return attempted_input_data, 0, curr_logs, attempted_hash
 
         # If there's a selectivity estimate, we need to take a sample of size sample_size_needed / selectivity
         if self.selectivity and sample_size_needed:
@@ -484,32 +487,29 @@ class OpContainer:
 
         # Clear any existing checkpoint before running
         if self.runner.intermediate_dir:
-            checkpoint_path = os.path.join(
-                self.runner.intermediate_dir,
-                self.name.split("/")[0],
-                f"{self.name.split('/')[-1]}.json",
-            )
-            if os.path.exists(checkpoint_path):
-                os.remove(checkpoint_path)
+            # Content-addressed paths are unique per hash — no need to delete stale files
+            # (they are simply never found again). We keep the no-op here for compatibility.
+            pass
 
         # Handle equijoin operations which have two input streams
         if self.is_equijoin:
             assert (
                 len(self.children) == 2
             ), "Equijoin should have left and right children"
-            left_data, left_cost, left_logs = self.children[0].next(
+            left_data, left_cost, left_logs, left_hash = self.children[0].next(
                 is_build, input_sample_size_needed
             )
-            right_data, right_cost, right_logs = self.children[1].next(
+            right_data, right_cost, right_logs, right_hash = self.children[1].next(
                 is_build, input_sample_size_needed
             )
             cost += left_cost + right_cost
             curr_logs += left_logs + right_logs
             input_len = max(len(left_data), len(right_data))
             input_data = {"left_data": left_data, "right_data": right_data}
+            upstream_data_hash = canonical_json_hash([left_hash, right_hash])
         # Handle standard operations with single input
         elif len(self.children) > 0:
-            input_data, input_cost, input_logs = self.children[0].next(
+            input_data, input_cost, input_logs, upstream_data_hash = self.children[0].next(
                 is_build, input_sample_size_needed
             )
             cost += input_cost
@@ -556,6 +556,8 @@ class OpContainer:
             if sample_size_needed:
                 output_data = smart_sample(output_data, sample_size_needed)
 
+        output_hash = canonical_json_hash(output_data)
+
         # Save checkpoint if enabled
         if (
             not is_build
@@ -564,10 +566,13 @@ class OpContainer:
             in self.runner.step_op_hashes[self.name.split("/")[0]]
         ):
             self.runner._save_checkpoint(
-                self.name.split("/")[0], self.name.split("/")[-1], output_data
+                self.name.split("/")[0],
+                self.name.split("/")[-1],
+                output_data,
+                upstream_data_hash,
             )
 
-        return output_data, cost, curr_logs
+        return output_data, cost, curr_logs, output_hash
 
     def syntax_check(self) -> str:
         operation = self.config["name"]
@@ -592,9 +597,9 @@ class OpContainer:
 class StepBoundary(OpContainer):
     def next(
         self, is_build: bool = False, sample_size_needed: int = None
-    ) -> tuple[list[dict], float, str]:
+    ) -> tuple[list[dict], float, str, str]:
 
-        output_data, step_cost, step_logs = self.children[0].next(
+        output_data, step_cost, step_logs, data_hash = self.children[0].next(
             is_build, sample_size_needed
         )
 
@@ -612,7 +617,7 @@ class StepBoundary(OpContainer):
                 )
             )
 
-        return output_data, 0, ""
+        return output_data, 0, "", data_hash
 
     def syntax_check(self) -> str:
         return ""

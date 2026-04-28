@@ -45,6 +45,7 @@ from docetl.dataset import Dataset, create_parsing_tool_map
 from docetl.operations import get_operation, get_operations
 from docetl.operations.base import BaseOperation
 from docetl.optimizer import Optimizer
+from docetl.storage import StorageBackend, canonical_json_hash, get_default_backend
 
 from . import schemas
 from .utils import classproperty
@@ -138,6 +139,8 @@ class DSLRunner(ConfigWrapper):
         self.intermediate_dir = (
             self.config.get("pipeline", {}).get("output", {}).get("intermediate_dir")
         )
+        # Storage backend — uses env vars DOCETL_STORAGE_URL / DOCETL_CACHE_DIR by default
+        self.storage = get_default_backend()
 
     def _setup_parsing_tools(self) -> None:
         """Set up parsing tools from configuration"""
@@ -502,7 +505,7 @@ class DSLRunner(ConfigWrapper):
         if self.last_op_container:
             self.load()
             self.console.rule("[bold]Pipeline Execution[/bold]")
-            output, _, _ = self.last_op_container.next()
+            output, _, _, _ = self.last_op_container.next()
             self.save(output)
 
         execution_time = time.time() - start_time
@@ -603,148 +606,138 @@ class DSLRunner(ConfigWrapper):
 
         output_config = self.config["pipeline"]["output"]
         if output_config["type"] == "file":
-            # Create the directory if it doesn't exist
-            if os.path.dirname(output_config["path"]):
-                os.makedirs(os.path.dirname(output_config["path"]), exist_ok=True)
-            if output_config["path"].lower().endswith(".json"):
-                with open(output_config["path"], "w") as file:
+            output_path = output_config["path"]
+            parent = os.path.dirname(output_path)
+            if parent:
+                self.storage.makedirs(parent, exist_ok=True)
+            if output_path.lower().endswith(".json"):
+                with self.storage.open(output_path, "w") as file:
                     json.dump(data, file, indent=2)
             else:  # CSV
                 import csv
+                import io as _io
 
-                with open(output_config["path"], "w", newline="") as file:
-                    writer = csv.DictWriter(file, fieldnames=data[0].keys())
-                    limited_data = [
-                        {k: d.get(k, None) for k in data[0].keys()} for d in data
-                    ]
-                    writer.writeheader()
-                    writer.writerows(limited_data)
+                buf = _io.StringIO()
+                writer = csv.DictWriter(buf, fieldnames=data[0].keys())
+                limited_data = [
+                    {k: d.get(k, None) for k in data[0].keys()} for d in data
+                ]
+                writer.writeheader()
+                writer.writerows(limited_data)
+                with self.storage.open(output_path, "w") as file:
+                    file.write(buf.getvalue())
             self.console.log(
-                f"[green]✓[/green] Saved to [dim]{output_config['path']}[/dim]\n"
+                f"[green]✓[/green] Saved to [dim]{output_path}[/dim]\n"
             )
         else:
             raise ValueError(
                 f"Unsupported output type: {output_config['type']}. Supported types: file"
             )
 
-    def _load_from_checkpoint_if_exists(
-        self, step_name: str, operation_name: str
-    ) -> list[dict] | None:
-        if self.intermediate_dir is None or self.config.get("bypass_cache", False):
-            return None
+    def _checkpoint_path(
+        self, step_name: str, operation_name: str, upstream_data_hash: str | None
+    ) -> str | None:
+        """
+        Compute content-addressed checkpoint filename.
 
-        intermediate_config_path = os.path.join(
-            self.intermediate_dir, ".docetl_intermediate_config.json"
-        )
-
-        if not os.path.exists(intermediate_config_path):
-            return None
-
-        # Make sure the step and op name is in the checkpoint config path
+        When upstream_data_hash is available the filename encodes both op-config
+        and upstream data, making it safe to cache forever (no separate registry).
+        Falls back to config-only hash when no upstream hash is provided.
+        """
         if (
             step_name not in self.step_op_hashes
             or operation_name not in self.step_op_hashes[step_name]
         ):
             return None
 
-        # See if the checkpoint config is the same as the current step op hash
-        with open(intermediate_config_path, "r") as f:
-            intermediate_config = json.load(f)
-
-        if (
-            intermediate_config.get(step_name, {}).get(operation_name, "")
-            != self.step_op_hashes[step_name][operation_name]
-        ):
-            return None
-
-        checkpoint_path = os.path.join(
-            self.intermediate_dir, step_name, f"{operation_name}.json"
+        op_config_hash = self.step_op_hashes[step_name][operation_name]
+        if upstream_data_hash:
+            combined = canonical_json_hash([upstream_data_hash, op_config_hash])
+        else:
+            combined = op_config_hash
+        short = combined[:24]
+        return os.path.join(
+            self.intermediate_dir, step_name, f"{operation_name}_{short}.json"
         )
-        # check if checkpoint exists
-        if os.path.exists(checkpoint_path):
-            if f"{step_name}_{operation_name}" not in self.datasets:
-                self.datasets[f"{step_name}_{operation_name}"] = Dataset(
-                    self, "file", checkpoint_path, "local"
-                )
 
-                self.console.log(
-                    f"[green]✓[/green] [italic]Loaded checkpoint for operation '{operation_name}' in step '{step_name}' from {checkpoint_path}[/italic]"
-                )
+    def _load_from_checkpoint_if_exists(
+        self,
+        step_name: str,
+        operation_name: str,
+        upstream_data_hash: str | None = None,
+    ) -> tuple[list[dict] | None, str | None]:
+        """
+        Returns (data, data_hash) if a valid checkpoint exists, else (None, None).
 
-                return self.datasets[f"{step_name}_{operation_name}"].load()
-        return None
+        Content-addressed filenames: a hit means the file exists under the hash
+        path; no separate registry (.docetl_intermediate_config.json) is needed.
+        """
+        if self.intermediate_dir is None or self.config.get("bypass_cache", False):
+            return None, None
+
+        checkpoint_path = self._checkpoint_path(
+            step_name, operation_name, upstream_data_hash
+        )
+        if checkpoint_path is None:
+            return None, None
+
+        if not self.storage.exists(checkpoint_path):
+            return None, None
+
+        ds_key = f"{step_name}_{operation_name}"
+        if ds_key not in self.datasets:
+            self.datasets[ds_key] = Dataset(self, "file", checkpoint_path, "local")
+
+        self.console.log(
+            f"[green]✓[/green] [italic]Loaded checkpoint for operation '{operation_name}' "
+            f"in step '{step_name}' from {checkpoint_path}[/italic]"
+        )
+
+        loaded = self.datasets[ds_key].load()
+        loaded_hash = canonical_json_hash(loaded)
+        return loaded, loaded_hash
 
     def clear_intermediate(self) -> None:
         """
         Clear the intermediate directory.
         """
-        # Remove the intermediate directory
         if self.intermediate_dir:
-            shutil.rmtree(self.intermediate_dir)
+            self.storage.rm(self.intermediate_dir, recursive=True)
             return
 
         raise ValueError("Intermediate directory not set. Cannot clear intermediate.")
 
     def _save_checkpoint(
-        self, step_name: str, operation_name: str, data: list[dict]
-    ) -> None:
+        self,
+        step_name: str,
+        operation_name: str,
+        data: list[dict],
+        upstream_data_hash: str | None = None,
+    ) -> str:
         """
-        Save a checkpoint of the current data after an operation.
+        Save a content-addressed checkpoint and return the data hash.
 
-        This method creates a JSON file containing the current state of the data
-        after an operation has been executed. The checkpoint is saved in a directory
-        structure that reflects the step and operation names.
-
-        Args:
-            step_name (str): The name of the current step in the pipeline.
-            operation_name (str): The name of the operation that was just executed.
-            data (list[dict]): The current state of the data to be checkpointed.
-
-        Note:
-            The checkpoint is saved only if a checkpoint directory has been specified
-            when initializing the DSLRunner.
+        The checkpoint filename encodes both op-config and upstream data so it
+        is valid forever — no separate registry file required.
         """
-        checkpoint_path = os.path.join(
-            self.intermediate_dir, step_name, f"{operation_name}.json"
+        checkpoint_path = self._checkpoint_path(
+            step_name, operation_name, upstream_data_hash
         )
-        if os.path.dirname(checkpoint_path):
-            os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-        with open(checkpoint_path, "w") as f:
+        if checkpoint_path is None:
+            return canonical_json_hash(data)
+
+        parent = os.path.dirname(checkpoint_path)
+        if parent:
+            self.storage.makedirs(parent, exist_ok=True)
+
+        with self.storage.open(checkpoint_path, "w") as f:
             json.dump(data, f)
 
-        # Update the intermediate config file with the hash for this step/operation
-        # so that future runs can validate and reuse this checkpoint.
-        if self.intermediate_dir:
-            intermediate_config_path = os.path.join(
-                self.intermediate_dir, ".docetl_intermediate_config.json"
-            )
-
-            # Initialize or load existing intermediate configuration
-            if os.path.exists(intermediate_config_path):
-                try:
-                    with open(intermediate_config_path, "r") as cfg_file:
-                        intermediate_config: dict[str, dict[str, str]] = json.load(
-                            cfg_file
-                        )
-                except json.JSONDecodeError:
-                    # If the file is corrupted, start fresh to avoid crashes
-                    intermediate_config = {}
-            else:
-                intermediate_config = {}
-
-            # Ensure nested dict structure exists
-            step_dict = intermediate_config.setdefault(step_name, {})
-
-            # Write (or overwrite) the hash for the current operation
-            step_dict[operation_name] = self.step_op_hashes[step_name][operation_name]
-
-            # Persist the updated configuration
-            with open(intermediate_config_path, "w") as cfg_file:
-                json.dump(intermediate_config, cfg_file, indent=2)
-
         self.console.log(
-            f"[green]✓ [italic]Intermediate saved for operation '{operation_name}' in step '{step_name}' at {checkpoint_path}[/italic][/green]"
+            f"[green]✓ [italic]Intermediate saved for operation '{operation_name}' "
+            f"in step '{step_name}' at {checkpoint_path}[/italic][/green]"
         )
+        return canonical_json_hash(data)
 
     def should_optimize(
         self, step_name: str, op_name: str, **kwargs
@@ -902,12 +895,12 @@ class DSLRunner(ConfigWrapper):
         op_batches_dir = os.path.join(
             self.intermediate_dir, f"{operation_name}_batches"
         )
-        os.makedirs(op_batches_dir, exist_ok=True)
+        self.storage.makedirs(op_batches_dir, exist_ok=True)
 
         # File name: 'batch_0.json', 'batch_1.json', etc.
         checkpoint_path = os.path.join(op_batches_dir, f"batch_{batch_index}.json")
 
-        with open(checkpoint_path, "w") as f:
+        with self.storage.open(checkpoint_path, "w") as f:
             json.dump(data, f)
 
         self.console.log(

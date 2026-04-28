@@ -155,7 +155,7 @@ class Node:
 
             # Execute the pipeline and get the result data
             if runner.last_op_container:
-                result_data, _, _ = runner.last_op_container.next()
+                result_data, _, _, _ = runner.last_op_container.next()
                 runner.save(result_data)
             else:
                 result_data = []

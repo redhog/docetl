@@ -220,17 +220,20 @@ class Dataset:
         if self.type == "memory":
             return self._apply_parsing_tools(self.path_or_data)
 
+        import fsspec
+
         _, ext = os.path.splitext(self.path_or_data.lower())
 
         if ext == ".json":
             import json
 
-            with open(self.path_or_data, "r") as f:
+            with fsspec.open(self.path_or_data, "r") as f:
                 data = json.load(f)
         elif ext == ".csv":
             import csv
+            import io
 
-            with open(self.path_or_data, "r") as f:
+            with fsspec.open(self.path_or_data, "r") as f:
                 reader = csv.DictReader(f)
                 data = list(reader)
         else:

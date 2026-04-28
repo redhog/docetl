@@ -291,7 +291,7 @@ def test_map_operation_includes_retrieved_context_in_output(tmp_path):
 
     runner = DSLRunner(config, max_threads=1)
     runner.load()
-    results, _, _ = runner.last_op_container.next()
+    results, _, _, _ = runner.last_op_container.next()
 
     # Verify that each result has the _retrieved_context key
     assert len(results) == 3, f"Expected 3 results, got {len(results)}"

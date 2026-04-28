@@ -206,7 +206,7 @@ def load_config(config_path: str) -> dict[str, Any]:
     Load and parse a YAML configuration file.
 
     Args:
-        config_path (str): Path to the YAML configuration file.
+        config_path (str): Path to the YAML configuration file (local or remote fsspec URL).
 
     Returns:
         dict[str, Any]: Parsed configuration as a dictionary.
@@ -215,8 +215,10 @@ def load_config(config_path: str) -> dict[str, Any]:
         FileNotFoundError: If the configuration file is not found.
         yaml.YAMLError: If there's an error parsing the YAML file.
     """
+    import fsspec
+
     try:
-        with open(config_path, "r") as config_file:
+        with fsspec.open(config_path, "r") as config_file:
             config: dict[str, Any] = yaml.safe_load(config_file)
         return config
     except FileNotFoundError:

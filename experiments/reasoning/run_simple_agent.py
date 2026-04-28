@@ -153,7 +153,7 @@ class PipelineExecutor:
             runner.load()
             
             if runner.last_op_container:
-                data, _, _ = runner.last_op_container.next()
+                data, _, _, _ = runner.last_op_container.next()
                 runner.save(data)
             
             # Get output path and sample outputs
@@ -823,7 +823,7 @@ def run_simple_agent_experiment(dataset: str, output_dir: str = None, model: str
         runner.load()
         
         if runner.last_op_container:
-            data, _, _ = runner.last_op_container.next()
+            data, _, _, _ = runner.last_op_container.next()
             runner.save(data)
         
         with open(final_yaml, 'r') as f:

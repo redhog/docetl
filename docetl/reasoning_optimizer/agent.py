@@ -501,7 +501,7 @@ def run_single_iteration(
         runner.load()
 
         if runner.last_op_container:
-            result_data, _, _ = runner.last_op_container.next()
+            result_data, _, _, _ = runner.last_op_container.next()
             runner.save(result_data)
             total_cost = runner.total_cost
             print(f"✅ Pipeline executed successfully, cost: ${total_cost:.4f}")

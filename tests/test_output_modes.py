@@ -193,7 +193,7 @@ def test_map_operation_complex_schema(output_mode, temp_output_file, temp_datase
     
     # Execute the pipeline and get results
     if runner.last_op_container:
-        results, _, _ = runner.last_op_container.next()
+        results, _, _, _ = runner.last_op_container.next()
     else:
         results = []
     
@@ -274,7 +274,7 @@ def test_reduce_operation_with_folding(output_mode, temp_output_file, temp_datas
     
     # Execute the pipeline and get results
     if runner.last_op_container:
-        results, _, _ = runner.last_op_container.next()
+        results, _, _, _ = runner.last_op_container.next()
     else:
         results = []
     
