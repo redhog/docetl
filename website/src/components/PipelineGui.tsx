@@ -246,6 +246,7 @@ const PipelineGUI: React.FC = () => {
     setCurrentFile,
     setFiles,
     setOutput,
+    output,
     isLoadingOutputs,
     setIsLoadingOutputs,
     files,
@@ -508,6 +509,11 @@ const PipelineGUI: React.FC = () => {
         setTerminalOutput(lastMessage.data);
       } else if (lastMessage.type === "result") {
         const runCost = lastMessage.data.cost || 0;
+
+        // Update output path to the actual checkpoint written by the runner
+        if (lastMessage.data.output_path && output) {
+          setOutput({ ...output, path: lastMessage.data.output_path });
+        }
 
         // Trigger should_optimize check for the last operation if enabled
         if (autoOptimizeCheck) {

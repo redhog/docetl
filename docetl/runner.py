@@ -343,6 +343,30 @@ class DSLRunner(ConfigWrapper):
                     all_ops_str.encode()
                 ).hexdigest()
 
+    def get_last_op_checkpoint_path(self) -> str | None:
+        """
+        Return the storage path of the most recent checkpoint written for the last
+        operation in the pipeline, or None if not determinable.
+        """
+        if not self.intermediate_dir:
+            return None
+        # Find the last step and its last operation from config
+        steps = self.config.get("pipeline", {}).get("steps", [])
+        if not steps:
+            return None
+        last_step = steps[-1]
+        step_name = last_step["name"]
+        ops = last_step.get("operations", [])
+        if not ops:
+            return None
+        last_op = ops[-1]
+        op_name = last_op if isinstance(last_op, str) else list(last_op.keys())[0]
+        pattern = storage_path_join(self.intermediate_dir, step_name, f"{op_name}_*.json")
+        matches = self.storage.glob(pattern)
+        if not matches:
+            return None
+        return sorted(matches)[-1]
+
     def get_output_path(self, require=False):
         output_path = self.config.get("pipeline", {}).get("output", {}).get("path")
         if output_path:

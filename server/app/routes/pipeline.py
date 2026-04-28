@@ -19,7 +19,7 @@ from server.app.models import (
     DecomposeRequest,
     DecomposeResult,
 )
-from server.app.path_rewriter import yaml_paths_to_storage, rewrite_path_to_storage
+from server.app.path_rewriter import yaml_paths_to_storage, rewrite_path_to_storage, storage_path_to_http
 
 # Setup logging
 FORMAT = "%(message)s"
@@ -456,6 +456,11 @@ async def websocket_run_pipeline(websocket: WebSocket, client_id: str):
         # Sleep for a short duration to ensure all output is captured
         await asyncio.sleep(3)
 
+        # Resolve actual output checkpoint path and convert to HTTP URL
+        last_checkpoint = runner.get_last_op_checkpoint_path()
+        output_path_http = storage_path_to_http(last_checkpoint) if last_checkpoint else None
+        print(f"[pipeline] last_checkpoint={last_checkpoint!r} -> output_path_http={output_path_http!r}")
+
         await websocket.send_json(
             {
                 "type": "result",
@@ -463,6 +468,7 @@ async def websocket_run_pipeline(websocket: WebSocket, client_id: str):
                     "message": "Pipeline executed successfully",
                     "cost": result,
                     "yaml_config": config["yaml_config"],
+                    "output_path": output_path_http,
                 },
             }
         )
