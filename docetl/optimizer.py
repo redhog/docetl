@@ -26,6 +26,7 @@ from docetl.optimizers.join_optimizer import JoinOptimizer
 from docetl.optimizers.map_optimizer import MapOptimizer
 from docetl.optimizers.reduce_optimizer import ReduceOptimizer
 from docetl.optimizers.utils import LLMClient
+from docetl.storage import get_default_backend, storage_path_join
 from docetl.utils import CapturedOutput
 
 if TYPE_CHECKING:
@@ -118,13 +119,15 @@ class Optimizer:
         # Add sample cache for build operations
         self.sample_cache = {}  # Maps operation names to (output_data, sample_size)
 
-        home_dir = os.environ.get("DOCETL_HOME_DIR", os.path.expanduser("~"))
-        cache_dir = os.path.join(home_dir, f".docetl/cache/{runner.yaml_file_suffix}")
-        os.makedirs(cache_dir, exist_ok=True)
+        _backend = get_default_backend()
+        cache_dir = storage_path_join(
+            _backend._fs_root, f"cache/{runner.yaml_file_suffix}"
+        )
+        _backend.makedirs(cache_dir, exist_ok=True)
 
         # Hash the config to create a unique identifier
         config_hash = hashlib.sha256(str(self.config).encode()).hexdigest()
-        self.optimized_ops_path = f"{cache_dir}/{config_hash}.yaml"
+        self.optimized_ops_path = storage_path_join(cache_dir, f"{config_hash}.yaml")
 
         # Update sample size map
         self.sample_size_map = SAMPLE_SIZE_MAP
@@ -424,9 +427,9 @@ class Optimizer:
 
         # If self.resume is True and there's a checkpoint, load it
         if self.resume:
-            if os.path.exists(self.optimized_ops_path):
-                # Load the yaml and change the runner with it
-                with open(self.optimized_ops_path, "r") as f:
+            _backend = get_default_backend()
+            if _backend.exists(self.optimized_ops_path):
+                with _backend.open(self.optimized_ops_path, "r") as f:
                     partial_optimized_config = yaml.safe_load(f)
                     self.console.log(
                         "[yellow]Loading partially optimized pipeline from checkpoint...[/yellow]"
@@ -568,7 +571,8 @@ class Optimizer:
         This is used to resume optimization from a previous run
         """
         clean_config = self.clean_optimized_config()
-        with open(self.optimized_ops_path, "w") as f:
+        _backend = get_default_backend()
+        with _backend.open(self.optimized_ops_path, "w") as f:
             yaml.safe_dump(clean_config, f, default_flow_style=False, width=80)
 
     # Recursively resolve all anchors and aliases
@@ -737,8 +741,8 @@ class Optimizer:
         and cleaning up internal optimization artifacts.
         """
         resolved_config = self.clean_optimized_config()
-
-        with open(optimized_config_path, "w") as f:
+        _backend = get_default_backend()
+        with _backend.open(optimized_config_path, "w") as f:
             yaml.safe_dump(resolved_config, f, default_flow_style=False, width=80)
             self.console.log(
                 f"[green italic]💾 Optimized config saved to {optimized_config_path}[/green italic]"

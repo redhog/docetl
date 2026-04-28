@@ -254,6 +254,46 @@ class StorageBackend:
     def isfile(self, path: str) -> bool:
         return self.fs.isfile(self._remote_path(path))
 
+    # ------------------------------------------------------------------
+    # Storage-relative path helpers (used by HTTP serving layer)
+    # ------------------------------------------------------------------
+
+    def to_storage_relative(self, path: str) -> str | None:
+        """
+        Given an absolute/fsspec path, return the path relative to _fs_root,
+        or None if it does not live under the storage root.
+
+        Example (local):
+            _fs_root = /home/alice/.docetl
+            path     = /home/alice/.docetl/ns/files/foo.json
+            returns  = ns/files/foo.json
+
+        Example (s3):
+            _fs_root = my-bucket/docetl
+            path     = my-bucket/docetl/ns/files/foo.json
+            returns  = ns/files/foo.json
+        """
+        rpath = self._remote_path(path)
+        root = self._fs_root.rstrip(self.fs.sep) + self.fs.sep
+        if rpath.startswith(root):
+            return rpath[len(root):]
+        # Also handle if path was already relative (no change needed)
+        if not os.path.isabs(path) and "://" not in path:
+            return path.lstrip("/")
+        return None
+
+    def from_storage_relative(self, rel: str) -> str:
+        """
+        Given a path relative to the storage root, return the full fsspec path.
+
+        Example:
+            rel     = ns/files/foo.json
+            returns = /home/alice/.docetl/ns/files/foo.json
+        """
+        return self.fs.sep.join(
+            [self._fs_root.rstrip(self.fs.sep), rel.lstrip("/")]
+        )
+
 
 # ---------------------------------------------------------------------------
 # Module-level singleton (lazy-initialised)
@@ -286,3 +326,17 @@ def canonical_json_hash(obj: Any) -> str:
 
     serialised = json.dumps(obj, sort_keys=True, ensure_ascii=True)
     return content_hash(serialised)
+
+
+def storage_path_join(*parts: str) -> str:
+    """
+    Join path segments for any fsspec URL, including s3://, http://, local.
+    Uses forward slashes throughout; does NOT use os.path.join (which mangles
+    s3:// → s3:/ on some platforms).
+    """
+    if not parts:
+        return ""
+    base = parts[0].rstrip("/")
+    for part in parts[1:]:
+        base = base + "/" + part.strip("/")
+    return base

@@ -29,7 +29,7 @@ app.add_middleware(
 # Include all routers,
 app.include_router(pipeline.router)
 app.include_router(convert.router)
-app.include_router(filesystem.router, prefix="/fs")
+app.include_router(filesystem.router)  # owns /files/{path} and /fs/* routes
 
 @app.get("/")
 async def root():

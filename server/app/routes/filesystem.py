@@ -1,52 +1,106 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse
 import os
 import yaml
-import shutil
 import httpx
 import json
 import csv
 from io import StringIO
-from pathlib import Path
 from server.app.models import PipelineConfigRequest, WorkspaceSaveRequest
 from docetl.storage import StorageBackend, get_default_backend
+from server.app.path_rewriter import (
+    yaml_paths_to_http,
+    yaml_paths_to_storage,
+    rewrite_path_to_http,
+    rewrite_path_to_storage,
+    http_to_storage_path,
+    storage_path_to_http,
+)
 
 router = APIRouter()
-
-
-def get_home_dir() -> str:
-    """Get the home directory from env var or user home"""
-    return os.getenv("DOCETL_HOME_DIR", os.path.expanduser("~"))
-
-
-def get_namespace_dir(namespace: str) -> str:
-    """Get the namespace directory path (as str for StorageBackend)"""
-    home_dir = get_home_dir()
-    return os.path.join(home_dir, ".docetl", namespace)
 
 
 def _storage() -> StorageBackend:
     return get_default_backend()
 
 
-@router.post("/check-namespace")
+def _namespace_dir(namespace: str) -> str:
+    """Namespace directory path relative to storage root, e.g. 'ns-uuid'."""
+    return namespace
+
+
+# ---------------------------------------------------------------------------
+# Storage-backed file server: GET /files/{rel_path}
+# ---------------------------------------------------------------------------
+
+@router.get("/files/{rel_path:path}")
+async def serve_storage_file(rel_path: str, request: Request):
+    """
+    Serve any file from the storage backend by its storage-relative path.
+    Content-addressed files (pipeline configs, checkpoints, uploads) are
+    cached forever; mutable files (workspace.yaml) must be accessed via
+    the /fs/workspace/{id} endpoint.
+
+    This endpoint is the target of all /files/… URLs embedded in pipeline YAML.
+    """
+    try:
+        if ".." in rel_path:
+            raise HTTPException(status_code=400, detail="Invalid path")
+
+        backend = _storage()
+        storage_path = backend.from_storage_relative(rel_path)
+
+        if not backend.exists(storage_path):
+            raise HTTPException(status_code=404, detail="File not found")
+
+        # If the local cache already has the file, serve it directly (fast path)
+        local_cache = backend._local_cache_path(storage_path)
+        if os.path.isfile(local_cache):
+            return FileResponse(
+                path=local_cache,
+                filename=os.path.basename(rel_path),
+                headers={"Cache-Control": "public, max-age=31536000, immutable"},
+            )
+
+        # Otherwise stream through the storage backend (pulls to cache on the way)
+        def _iter():
+            with backend.open(storage_path, "rb") as f:
+                while chunk := f.read(65536):
+                    yield chunk
+
+        return StreamingResponse(
+            _iter(),
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to serve file: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Namespace
+# ---------------------------------------------------------------------------
+
+@router.post("/fs/check-namespace")
 async def check_namespace(namespace: str):
     """Check if namespace exists and create if it doesn't"""
     try:
         backend = _storage()
-        ns_dir = get_namespace_dir(namespace)
+        ns_dir = _namespace_dir(namespace)
         exists = backend.exists(ns_dir)
-
         if not exists:
             backend.makedirs(ns_dir, exist_ok=True)
-
         return {"exists": exists}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to check/create namespace: {str(e)}")
 
 
+# ---------------------------------------------------------------------------
+# File upload
+# ---------------------------------------------------------------------------
+
 def validate_json_content(content: bytes) -> None:
-    """Validate that content can be parsed as JSON"""
     try:
         json.loads(content)
     except json.JSONDecodeError as e:
@@ -54,11 +108,9 @@ def validate_json_content(content: bytes) -> None:
 
 
 def convert_csv_to_json(csv_content: bytes) -> bytes:
-    """Convert CSV content to JSON format"""
     try:
         csv_string = csv_content.decode('utf-8')
-        csv_file = StringIO(csv_string)
-        reader = csv.DictReader(csv_file)
+        reader = csv.DictReader(StringIO(csv_string))
         data = list(reader)
         if not data:
             raise HTTPException(status_code=400, detail="CSV file is empty")
@@ -75,28 +127,28 @@ def is_likely_csv(content: bytes, filename: str) -> bool:
     try:
         first_line = content.split(b'\n')[0].decode('utf-8')
         return ',' in first_line and not any(c in first_line for c in '{}[]')
-    except:
+    except Exception:
         return False
 
 
-@router.post("/upload-file")
+@router.post("/fs/upload-file")
 async def upload_file(
     file: UploadFile | None = File(None),
     url: str | None = Form(None),
     namespace: str = Form(...)
 ):
-    """Upload a file to the namespace files directory, either from a direct upload or a URL"""
+    """Upload a file; returns HTTP /files/… URL for the stored file."""
     try:
         if not file and not url:
             raise HTTPException(status_code=400, detail="Either file or url must be provided")
 
         backend = _storage()
-        upload_dir = os.path.join(get_namespace_dir(namespace), "files")
+        upload_dir = f"{_namespace_dir(namespace)}/files"
         backend.makedirs(upload_dir, exist_ok=True)
 
         if url:
             filename = url.split("/")[-1] or "dataset.json"
-            file_path = os.path.join(upload_dir, filename.replace('.csv', '.json'))
+            storage_path = f"{upload_dir}/{filename.replace('.csv', '.json')}"
 
             async with httpx.AsyncClient() as client:
                 async with client.stream('GET', url, follow_redirects=True) as response:
@@ -111,132 +163,159 @@ async def upload_file(
                             content_chunks.append(chunk)
                     content = b''.join(content_chunks)
 
-                    if is_likely_csv(content, filename):
-                        try:
-                            content = convert_csv_to_json(content)
-                        except HTTPException as e:
-                            raise HTTPException(
-                                status_code=400,
-                                detail=f"Failed to convert CSV to JSON: {str(e.detail)}"
-                            )
+            if is_likely_csv(content, filename):
+                content = convert_csv_to_json(content)
+            validate_json_content(content)
 
-                    validate_json_content(content)
-
-                    with backend.open(file_path, "wb") as f:
-                        f.write(content)
+            with backend.open(storage_path, "wb") as f:
+                f.write(content)
         else:
             file_content = await file.read()
-
             if file.filename.lower().endswith('.csv'):
-                try:
-                    file_content = convert_csv_to_json(file_content)
-                except HTTPException as e:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Failed to convert CSV to JSON: {str(e.detail)}"
-                    )
-
+                file_content = convert_csv_to_json(file_content)
             validate_json_content(file_content)
-
-            file_path = os.path.join(upload_dir, file.filename.replace('.csv', '.json'))
-            with backend.open(file_path, "wb") as f:
+            storage_path = f"{upload_dir}/{file.filename.replace('.csv', '.json')}"
+            with backend.open(storage_path, "wb") as f:
                 f.write(file_content)
 
-        return {"path": file_path}
+        # Return HTTP URL so client never sees raw storage paths
+        http_url = storage_path_to_http(backend.from_storage_relative(storage_path))
+        return {"path": http_url}
+    except HTTPException:
+        raise
     except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
         raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
 
 
-@router.post("/save-documents")
+@router.post("/fs/save-documents")
 async def save_documents(files: list[UploadFile] = File(...), namespace: str = Form(...)):
-    """Save multiple documents to the namespace documents directory"""
+    """Save documents; returns HTTP /files/… URLs."""
     try:
         backend = _storage()
-        uploads_dir = os.path.join(get_namespace_dir(namespace), "documents")
+        uploads_dir = f"{_namespace_dir(namespace)}/documents"
         backend.makedirs(uploads_dir, exist_ok=True)
 
         saved_files = []
         for file in files:
             safe_name = "".join(c if c.isalnum() or c in ".-" else "_" for c in file.filename)
-            file_path = os.path.join(uploads_dir, safe_name)
+            storage_path = f"{uploads_dir}/{safe_name}"
             content = await file.read()
-            with backend.open(file_path, "wb") as f:
+            with backend.open(storage_path, "wb") as f:
                 f.write(content)
-            saved_files.append({"name": file.filename, "path": file_path})
+            http_url = storage_path_to_http(backend.from_storage_relative(storage_path))
+            saved_files.append({"name": file.filename, "path": http_url})
 
         return {"files": saved_files}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save documents: {str(e)}")
 
 
-@router.post("/write-pipeline-config")
+# ---------------------------------------------------------------------------
+# Pipeline config
+# ---------------------------------------------------------------------------
+
+@router.post("/fs/write-pipeline-config")
 async def write_pipeline_config(request: PipelineConfigRequest):
-    """Write pipeline configuration YAML file"""
+    """
+    Receive pipeline YAML from client (paths as HTTP /files/… URLs),
+    rewrite to storage paths, write to storage, return HTTP URLs.
+    """
     try:
         backend = _storage()
-        home_dir = get_home_dir()
-        pipeline_dir = os.path.join(home_dir, ".docetl", request.namespace, "pipelines")
-        config_dir = os.path.join(pipeline_dir, "configs")
-        name_dir = os.path.join(pipeline_dir, request.name, "intermediates")
+
+        # Rewrite HTTP /files/ URLs → storage paths before persisting
+        storage_yaml = yaml_paths_to_storage(request.config)
+
+        pipeline_dir = f"{_namespace_dir(request.namespace)}/pipelines"
+        config_dir = f"{pipeline_dir}/configs"
+        name_dir = f"{pipeline_dir}/{request.name}/intermediates"
 
         backend.makedirs(config_dir, exist_ok=True)
         backend.makedirs(name_dir, exist_ok=True)
 
-        file_path = os.path.join(config_dir, f"{request.name}.yaml")
-        with backend.open(file_path, "w") as f:
-            f.write(request.config)
+        storage_path = f"{config_dir}/{request.name}.yaml"
+        with backend.open(storage_path, "w") as f:
+            f.write(storage_yaml)
+
+        # Rewrite response paths → HTTP URLs for the client
+        http_file_path = storage_path_to_http(backend.from_storage_relative(storage_path))
+        http_input_path = rewrite_path_to_http(request.input_path) if request.input_path else request.input_path
+        http_output_path = rewrite_path_to_http(request.output_path) if request.output_path else request.output_path
 
         return {
-            "filePath": file_path,
-            "inputPath": request.input_path,
-            "outputPath": request.output_path
+            "filePath": http_file_path,
+            "inputPath": http_input_path,
+            "outputPath": http_output_path,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write pipeline configuration: {str(e)}")
 
 
-@router.get("/read-file")
-async def read_file(path: str):
-    """Read file contents"""
-    try:
-        if path.startswith(("http://", "https://")):
-            raise HTTPException(status_code=400, detail="HTTP URLs not supported in this endpoint")
+# ---------------------------------------------------------------------------
+# Generic file reads (legacy endpoints — accept storage paths or HTTP URLs)
+# ---------------------------------------------------------------------------
 
+def _resolve_to_storage_path(path: str) -> str:
+    """Accept a storage path or HTTP /files/ URL; return storage path."""
+    from server.app.path_rewriter import _is_files_url
+    if _is_files_url(path):
+        return http_to_storage_path(path)
+    return path
+
+
+@router.get("/fs/read-file")
+async def read_file(path: str):
+    """Read file contents. Accepts storage paths or HTTP /files/ URLs.
+    When serving YAML, rewrites embedded paths to HTTP URLs."""
+    try:
+        if path.startswith(("http://", "https://")) and not path.split("//", 1)[1].startswith(
+            ("localhost", "127.0.0.1")
+        ):
+            raise HTTPException(status_code=400, detail="External HTTP URLs not supported")
+
+        storage_path = _resolve_to_storage_path(path)
         backend = _storage()
-        if not backend.exists(path):
+        if not backend.exists(storage_path):
             raise HTTPException(status_code=404, detail="File not found")
 
-        # For local backend, FileResponse is most efficient
-        if os.path.isfile(path):
-            return FileResponse(path)
+        # For YAML files: read, rewrite paths, return as text
+        if storage_path.endswith((".yaml", ".yml")):
+            with backend.open(storage_path, "r", bypass_cache=storage_path.endswith("workspace.yaml")) as f:
+                raw = f.read()
+            rewritten = yaml_paths_to_http(raw)
+            from fastapi.responses import PlainTextResponse
+            return PlainTextResponse(rewritten, media_type="text/yaml")
 
-        # Remote backend: stream through
+        # Fast path: serve from local cache if available
+        local_cache = backend._local_cache_path(backend._remote_path(storage_path))
+        if os.path.isfile(local_cache):
+            return FileResponse(local_cache)
+
         def _iter():
-            with backend.open(path, "rb") as f:
+            with backend.open(storage_path, "rb") as f:
                 while chunk := f.read(65536):
                     yield chunk
 
         return StreamingResponse(_iter())
+    except HTTPException:
+        raise
     except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
         raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
 
 
-@router.get("/read-file-page")
+@router.get("/fs/read-file-page")
 async def read_file_page(path: str, page: int = 0, chunk_size: int = 500000):
-    """Read file contents by page"""
+    """Paginated file read. Accepts storage paths or HTTP /files/ URLs."""
     try:
+        storage_path = _resolve_to_storage_path(path)
         backend = _storage()
-        if not backend.exists(path):
+        if not backend.exists(storage_path):
             raise HTTPException(status_code=404, detail="File not found")
 
-        file_size = backend.info(path).get("size", 0)
+        file_size = backend.info(storage_path).get("size", 0)
         start = page * chunk_size
 
-        with backend.open(path, "rb") as f:
+        with backend.open(storage_path, "rb") as f:
             f.seek(start)
             content = f.read(chunk_size).decode("utf-8")
 
@@ -244,58 +323,66 @@ async def read_file_page(path: str, page: int = 0, chunk_size: int = 500000):
             "content": content,
             "totalSize": file_size,
             "page": page,
-            "hasMore": start + len(content) < file_size
+            "hasMore": start + len(content) < file_size,
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
         raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
 
 
-@router.get("/serve-document/{path:path}")
+@router.get("/fs/serve-document/{path:path}")
 async def serve_document(path: str):
-    """Serve document files"""
+    """Serve document files by storage-relative path."""
     try:
         if ".." in path:
             raise HTTPException(status_code=400, detail="Invalid file path")
 
         backend = _storage()
-        if not backend.exists(path):
+        storage_path = backend.from_storage_relative(path)
+        if not backend.exists(storage_path):
             raise HTTPException(status_code=404, detail="File not found")
 
-        if os.path.isfile(path):
+        local_cache = backend._local_cache_path(storage_path)
+        if os.path.isfile(local_cache):
             return FileResponse(
-                path=path,
+                path=local_cache,
                 filename=os.path.basename(path),
-                headers={"Cache-Control": "public, max-age=3600"}
+                headers={"Cache-Control": "public, max-age=3600"},
             )
 
         def _iter():
-            with backend.open(path, "rb") as f:
+            with backend.open(storage_path, "rb") as f:
                 while chunk := f.read(65536):
                     yield chunk
 
         return StreamingResponse(
             _iter(),
-            headers={"Cache-Control": "public, max-age=3600"}
+            headers={"Cache-Control": "public, max-age=3600"},
         )
+    except HTTPException:
+        raise
     except Exception as e:
-        if isinstance(e, HTTPException):
-            raise e
         raise HTTPException(status_code=500, detail=f"Failed to serve file: {str(e)}")
 
 
-@router.get("/workspace/{workspace_id}")
+# ---------------------------------------------------------------------------
+# Workspace (mutable — bypass cache, paths not content-addressed)
+# ---------------------------------------------------------------------------
+
+@router.get("/fs/workspace/{workspace_id}")
 async def load_workspace(workspace_id: str):
-    """Load workspace state YAML for a given workspace UUID"""
+    """Load workspace YAML; rewrites embedded paths to HTTP URLs."""
     try:
         backend = _storage()
-        workspace_file = os.path.join(get_namespace_dir(workspace_id), "workspace.yaml")
-        if not backend.exists(workspace_file):
+        workspace_rel = f"{_namespace_dir(workspace_id)}/workspace.yaml"
+        storage_path = backend.from_storage_relative(workspace_rel)
+        if not backend.exists(storage_path):
             raise HTTPException(status_code=404, detail="Workspace not found")
-        # bypass_cache=True: workspace is mutable state
-        with backend.open(workspace_file, "r", bypass_cache=True) as f:
-            content = f.read()
+        with backend.open(storage_path, "r", bypass_cache=True) as f:
+            raw = f.read()
+        # workspace YAML may contain pipeline paths — rewrite for client
+        content = yaml_paths_to_http(raw)
         return {"content": content}
     except HTTPException:
         raise
@@ -303,28 +390,30 @@ async def load_workspace(workspace_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to load workspace: {str(e)}")
 
 
-@router.post("/workspace/{workspace_id}")
+@router.post("/fs/workspace/{workspace_id}")
 async def save_workspace(workspace_id: str, request: WorkspaceSaveRequest):
-    """Save workspace state YAML for a given workspace UUID"""
+    """Save workspace YAML; rewrites HTTP /files/ URLs back to storage paths."""
     try:
         backend = _storage()
-        ns_dir = get_namespace_dir(workspace_id)
-        backend.makedirs(ns_dir, exist_ok=True)
-        workspace_file = os.path.join(ns_dir, "workspace.yaml")
-        # bypass_cache=True: mutable file — write directly through to remote
-        with backend.open(workspace_file, "w", bypass_cache=True) as f:
-            f.write(request.content)
+        ns_rel = _namespace_dir(workspace_id)
+        backend.makedirs(ns_rel, exist_ok=True)
+        workspace_rel = f"{ns_rel}/workspace.yaml"
+        storage_path = backend.from_storage_relative(workspace_rel)
+        storage_content = yaml_paths_to_storage(request.content)
+        with backend.open(storage_path, "w", bypass_cache=True) as f:
+            f.write(storage_content)
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save workspace: {str(e)}")
 
 
-@router.get("/check-file")
+@router.get("/fs/check-file")
 async def check_file(path: str):
-    """Check if a file exists without reading it"""
+    """Check file existence. Accepts storage paths or HTTP /files/ URLs."""
     try:
+        storage_path = _resolve_to_storage_path(path)
         backend = _storage()
-        exists = backend.exists(path)
+        exists = backend.exists(storage_path)
         return {"exists": exists}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to check file: {str(e)}")

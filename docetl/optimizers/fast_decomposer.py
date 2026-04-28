@@ -18,6 +18,7 @@ from litellm import completion, model_cost
 from rich.console import Console
 
 from docetl.console import get_console
+from docetl.storage import get_default_backend, storage_path_join
 from docetl.reasoning_optimizer.directives import (
     ChainingDirective,
     ClarifyInstructionsDirective,
@@ -90,10 +91,10 @@ class FastDecomposer:
         self.total_cost = 0.0
         self.console = console or get_console()
 
-        # Load the config
+        # Load the config via storage backend
         import yaml
-
-        with open(yaml_config_path, "r") as f:
+        _backend = get_default_backend()
+        with _backend.open(yaml_config_path, "r") as f:
             self.config = yaml.safe_load(f)
 
         self.operators = self.config.get("operations", [])
@@ -260,26 +261,28 @@ class FastDecomposer:
         if op_idx == 0:
             # First operation - load from dataset
             datasets = self.config.get("datasets", {})
-            # Get the first dataset (or the one used by this step)
+            _backend = get_default_backend()
             for dataset_name, dataset_config in datasets.items():
                 dataset_path = dataset_config.get("path")
-                if dataset_path and os.path.exists(dataset_path):
-                    with open(dataset_path, "r") as f:
+                if dataset_path and _backend.exists(dataset_path):
+                    with _backend.open(dataset_path, "r") as f:
                         data = json.load(f)
                     return data[: self.sample_size]
             raise FileNotFoundError("No dataset found in config")
         else:
-            # Load from previous operation's intermediate output
+            # Load from previous operation's content-addressed checkpoint
+            _backend = get_default_backend()
             prev_op_name = op_names[op_idx - 1]
-            output_path = os.path.join(
-                self.intermediate_dir, step_name, f"{prev_op_name}.json"
-            )
-            if not os.path.exists(output_path):
+            step_dir = storage_path_join(self.intermediate_dir, step_name)
+            pattern = storage_path_join(step_dir, f"{prev_op_name}_*.json")
+            matches = _backend.glob(pattern)
+            if not matches:
                 raise FileNotFoundError(
-                    f"No intermediate output found at {output_path}. "
+                    f"No intermediate output found for '{prev_op_name}' in '{step_name}'. "
                     "Run the previous operation first."
                 )
-            with open(output_path, "r") as f:
+            output_path = sorted(matches)[-1]
+            with _backend.open(output_path, "r") as f:
                 data = json.load(f)
             return data[: self.sample_size]
 

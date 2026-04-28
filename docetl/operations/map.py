@@ -350,7 +350,7 @@ Reference anchors:"""
                 if pdf_url.startswith("http"):
                     file_data = requests.get(pdf_url).content
                 else:
-                    with open(pdf_url, "rb") as f:
+                    with __import__("fsspec").open(pdf_url, "rb") as f:
                         file_data = f.read()
                 encoded_file = base64.b64encode(file_data).decode("utf-8")
                 base64_url = f"data:application/pdf;base64,{encoded_file}"
@@ -752,7 +752,7 @@ class ParallelMapOperation(BaseOperation):
                 if pdf_url.startswith("http"):
                     file_data = requests.get(pdf_url).content
                 else:
-                    with open(pdf_url, "rb") as f:
+                    with __import__("fsspec").open(pdf_url, "rb") as f:
                         file_data = f.read()
                 encoded_file = base64.b64encode(file_data).decode("utf-8")
                 base64_url = f"data:application/pdf;base64,{encoded_file}"

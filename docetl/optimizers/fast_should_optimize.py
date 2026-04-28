@@ -12,6 +12,7 @@ from typing import Any
 import litellm
 from litellm import completion, model_cost
 
+from docetl.storage import get_default_backend, storage_path_join
 from docetl.utils import completion_cost, count_tokens
 
 # Drop unsupported params for models like gpt-5 that don't support temperature=0
@@ -48,25 +49,21 @@ class FastShouldOptimizeAnalyzer:
 
     def load_operation_data(self, step_name: str, op_name: str) -> list[dict[str, Any]]:
         """
-        Load data from the intermediate file for an operation.
-
-        Args:
-            step_name: Name of the pipeline step
-            op_name: Name of the operation
-
-        Returns:
-            List of dictionaries
-
-        Raises:
-            FileNotFoundError: If the intermediate file doesn't exist
+        Load data from the most recent content-addressed checkpoint for an operation.
         """
-        output_path = os.path.join(self.intermediate_dir, step_name, f"{op_name}.json")
-        if not os.path.exists(output_path):
+        backend = get_default_backend()
+        step_dir = storage_path_join(self.intermediate_dir, step_name)
+        # Content-addressed filenames: {op_name}_{hash}.json — glob for any match
+        pattern = storage_path_join(step_dir, f"{op_name}_*.json")
+        matches = backend.glob(pattern)
+        if not matches:
             raise FileNotFoundError(
-                f"No output file found at {output_path}. "
-                "Run the operation first to generate outputs."
+                f"No checkpoint found for operation '{op_name}' in step '{step_name}' "
+                f"under {step_dir}. Run the operation first."
             )
-        with open(output_path, "r") as f:
+        # Use the most recently modified match
+        output_path = sorted(matches)[-1]
+        with backend.open(output_path, "r") as f:
             return json.load(f)
 
     def find_previous_operation(

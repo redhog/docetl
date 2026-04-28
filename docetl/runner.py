@@ -29,7 +29,6 @@ import functools
 import hashlib
 import json
 import os
-import shutil
 import time
 from collections import defaultdict
 from typing import Any
@@ -45,7 +44,7 @@ from docetl.dataset import Dataset, create_parsing_tool_map
 from docetl.operations import get_operation, get_operations
 from docetl.operations.base import BaseOperation
 from docetl.optimizer import Optimizer
-from docetl.storage import StorageBackend, canonical_json_hash, get_default_backend
+from docetl.storage import StorageBackend, canonical_json_hash, get_default_backend, storage_path_join
 
 from . import schemas
 from .utils import classproperty
@@ -607,7 +606,7 @@ class DSLRunner(ConfigWrapper):
         output_config = self.config["pipeline"]["output"]
         if output_config["type"] == "file":
             output_path = output_config["path"]
-            parent = os.path.dirname(output_path)
+            parent = storage_path_join(*output_path.replace("\\", "/").split("/")[:-1])
             if parent:
                 self.storage.makedirs(parent, exist_ok=True)
             if output_path.lower().endswith(".json"):
@@ -656,7 +655,7 @@ class DSLRunner(ConfigWrapper):
         else:
             combined = op_config_hash
         short = combined[:24]
-        return os.path.join(
+        return storage_path_join(
             self.intermediate_dir, step_name, f"{operation_name}_{short}.json"
         )
 
@@ -726,7 +725,7 @@ class DSLRunner(ConfigWrapper):
         if checkpoint_path is None:
             return canonical_json_hash(data)
 
-        parent = os.path.dirname(checkpoint_path)
+        parent = storage_path_join(*checkpoint_path.split("/")[:-1]) if "/" in checkpoint_path else ""
         if parent:
             self.storage.makedirs(parent, exist_ok=True)
 
@@ -808,16 +807,14 @@ class DSLRunner(ConfigWrapper):
         )
 
         if save:
-            # If output path is provided, save the optimized config to that path
             if kwargs.get("save_path"):
                 save_path = kwargs["save_path"]
-                if not os.path.isabs(save_path):
-                    save_path = os.path.join(os.getcwd(), save_path)
                 builder.save_optimized_config(save_path)
                 self.optimized_config_path = save_path
             else:
-                builder.save_optimized_config(f"{self.base_name}_opt.yaml")
-                self.optimized_config_path = f"{self.base_name}_opt.yaml"
+                save_path = f"{self.base_name}_opt.yaml"
+                builder.save_optimized_config(save_path)
+                self.optimized_config_path = save_path
 
         if return_pipeline:
             return (
@@ -892,13 +889,10 @@ class DSLRunner(ConfigWrapper):
         if not self.intermediate_dir:
             return
 
-        op_batches_dir = os.path.join(
-            self.intermediate_dir, f"{operation_name}_batches"
-        )
+        op_batches_dir = storage_path_join(self.intermediate_dir, f"{operation_name}_batches")
         self.storage.makedirs(op_batches_dir, exist_ok=True)
 
-        # File name: 'batch_0.json', 'batch_1.json', etc.
-        checkpoint_path = os.path.join(op_batches_dir, f"batch_{batch_index}.json")
+        checkpoint_path = storage_path_join(op_batches_dir, f"batch_{batch_index}.json")
 
         with self.storage.open(checkpoint_path, "w") as f:
             json.dump(data, f)

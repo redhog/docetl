@@ -222,7 +222,7 @@ class Dataset:
 
         import fsspec
 
-        _, ext = os.path.splitext(self.path_or_data.lower())
+        _, ext = os.path.splitext(self.path_or_data.lower().split("?")[0])
 
         if ext == ".json":
             import json
@@ -351,13 +351,14 @@ class Dataset:
                 )
             return self._apply_parsing_tools(sampled_data)
 
-        _, ext = os.path.splitext(self.path_or_data.lower())
+        _, ext = os.path.splitext(self.path_or_data.lower().split("?")[0])
 
         if ext == ".json":
             import json
             import random as rd
+            import fsspec
 
-            with open(self.path_or_data, "r") as f:
+            with fsspec.open(self.path_or_data, "r") as f:
                 if random:
                     data = json.load(f)
                     if n > len(data):
@@ -371,8 +372,9 @@ class Dataset:
         elif ext == ".csv":
             import csv
             import random as rd
+            import fsspec
 
-            with open(self.path_or_data, "r") as f:
+            with fsspec.open(self.path_or_data, "r") as f:
                 reader = csv.DictReader(f)
                 if random:
                     data = list(reader)

@@ -125,11 +125,49 @@ export function generatePipelineConfig(
   optimizerModel: string = "gpt-4o",
   extraPipelineSettings: Record<string, unknown> | null = null
 ) {
-  const datasets = data?.path
+  // Build the base HTTP URL for the storage backend.
+  // Paths in pipeline YAML are served as /files/{storage-relative-path}.
+  const protocol = process.env.NEXT_PUBLIC_BACKEND_HTTPS ? "https" : "http";
+  const backendHost = process.env.NEXT_PUBLIC_BACKEND_HOST || "localhost";
+  const backendPort = process.env.NEXT_PUBLIC_BACKEND_PORT || "8000";
+  const backendBase = `${protocol}://${backendHost}:${backendPort}`;
+
+  // Convert any path to a /files/ HTTP URL.
+  // If already a /files/ URL on this server, return as-is.
+  // If an absolute local path under homeDir/.docetl, convert to relative.
+  // Otherwise return as-is (e.g. already a full HTTP URL for another resource).
+  const toFilesUrl = (p: string): string => {
+    if (!p) return p;
+    const filesPrefix = `${backendBase}/files/`;
+    if (p.startsWith(filesPrefix)) return p;
+    // Absolute path under homeDir/.docetl → strip to storage-relative
+    const storageRoot = homeDir + "/.docetl/";
+    if (p.startsWith(storageRoot)) {
+      return filesPrefix + p.slice(storageRoot.length);
+    }
+    // Namespace-relative convenience: just namespace/...
+    // Any other absolute path — wrap under files/ using the portion after the root
+    if (path.isAbsolute(p)) {
+      // Strip leading slash and use as relative storage path
+      return filesPrefix + p.replace(/^\/+/, "");
+    }
+    return p;
+  };
+
+  // Storage-relative paths for output/intermediates (relative to storage root = ~/.docetl)
+  const outputRelPath = `${namespace}/pipelines/outputs/${name}.json`;
+  const intermediateRelPath = `${namespace}/pipelines/${name}/intermediates`;
+
+  const outputPath = `${backendBase}/files/${outputRelPath}`;
+  const intermediatePath = `${backendBase}/files/${intermediateRelPath}`;
+
+  // Input dataset path: normalise whatever was stored in state
+  const inputDataPath = data?.path ? toFilesUrl(data.path) : null;
+  const datasets = inputDataPath
     ? {
         input: {
           type: "file",
-          path: data.path,
+          path: inputDataPath,
           source: "local",
         },
       }
@@ -321,22 +359,8 @@ export function generatePipelineConfig(
       ],
       output: {
         type: "file",
-        path: path.join(
-          homeDir,
-          ".docetl",
-          namespace,
-          "pipelines",
-          "outputs",
-          `${name}.json`
-        ),
-        intermediate_dir: path.join(
-          homeDir,
-          ".docetl",
-          namespace,
-          "pipelines",
-          name,
-          "intermediates"
-        ),
+        path: outputPath,
+        intermediate_dir: intermediatePath,
       },
     },
     system_prompt: {},
@@ -375,23 +399,21 @@ export function generatePipelineConfig(
   }
 
   // Get the inputPath from the intermediate_dir
-  let inputPath;
-  let outputPath;
+  let returnInputPath: string;
+  let returnOutputPath: string;
   const prevOpIndex = operationsToRun.length - 2;
   const currentOpIndex = operationsToRun.length - 1;
 
   if (prevOpIndex >= 0) {
-    const inputBase = pipelineConfig.pipeline.output.intermediate_dir;
     const opName = operationsToRun[prevOpIndex].name;
-    inputPath = path.join(inputBase, "data_processing", opName + ".json");
+    returnInputPath = `${backendBase}/files/${intermediateRelPath}/data_processing/${opName}.json`;
   } else {
     // If there are no previous operations, use the dataset path (or empty string if no data)
-    inputPath = data?.path ?? "";
+    returnInputPath = inputDataPath ?? "";
   }
 
-  const outputBase = pipelineConfig.pipeline.output.intermediate_dir;
   const outputOpName = operationsToRun[currentOpIndex].name;
-  outputPath = path.join(outputBase, "data_processing", outputOpName + ".json");
+  returnOutputPath = `${backendBase}/files/${intermediateRelPath}/data_processing/${outputOpName}.json`;
 
   // Sanitize the config before serializing to YAML to catch any [object Object] issues
   const sanitizedConfig = sanitizeForYaml(pipelineConfig, "pipelineConfig");
@@ -401,7 +423,7 @@ export function generatePipelineConfig(
 
   return {
     yamlString,
-    inputPath,
-    outputPath,
+    inputPath: returnInputPath,
+    outputPath: returnOutputPath,
   };
 }

@@ -393,8 +393,10 @@ def extract_output_from_json(yaml_file_path, json_output_path=None):
         List[Dict]: Extracted data containing only the fields specified in the output schema,
                    or all fields if no output schema is defined
     """
+    import fsspec
+
     # Load YAML configuration
-    with open(yaml_file_path, "r") as f:
+    with fsspec.open(yaml_file_path, "r") as f:
         config = yaml.safe_load(f)
 
     if json_output_path is None:
@@ -403,7 +405,7 @@ def extract_output_from_json(yaml_file_path, json_output_path=None):
             raise ValueError("No output path found in YAML file")
 
     # Load JSON output data
-    with open(json_output_path, "r") as f:
+    with fsspec.open(json_output_path, "r") as f:
         output_data = json.load(f)
 
     # Find the last operation in the pipeline

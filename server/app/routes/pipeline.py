@@ -19,6 +19,7 @@ from server.app.models import (
     DecomposeRequest,
     DecomposeResult,
 )
+from server.app.path_rewriter import yaml_paths_to_storage, rewrite_path_to_storage
 
 # Setup logging
 FORMAT = "%(message)s"
@@ -76,13 +77,12 @@ async def run_optimization(task_id: str, yaml_config: str, step_name: str, op_na
     try:
         tasks[task_id].status = TaskStatus.PROCESSING
 
-        # yaml_config is a file path, not YAML content - read and parse the file
-        if yaml_config.endswith(".yaml") or yaml_config.endswith(".yml"):
-            with open(yaml_config, "r") as f:
-                config = yaml.safe_load(f)
-        else:
-            # Fallback: try parsing as YAML string
-            config = yaml.safe_load(yaml_config)
+        from docetl.storage import get_default_backend as _get_backend
+        _backend = _get_backend()
+        yaml_config_path = rewrite_path_to_storage(yaml_config)
+        with _backend.open(yaml_config_path, "r") as f:
+            raw_yaml = f.read()
+        config = yaml.safe_load(yaml_paths_to_storage(raw_yaml))
 
         # Validate that we got a dict
         if not isinstance(config, dict):
@@ -237,13 +237,13 @@ async def run_decomposition(task_id: str, yaml_config: str, step_name: str, op_n
     try:
         decompose_tasks[task_id].status = TaskStatus.PROCESSING
 
-        # yaml_config is a file path
-        if not (yaml_config.endswith(".yaml") or yaml_config.endswith(".yml")):
-            raise ValueError("yaml_config must be a path to a YAML file")
+        yaml_config = rewrite_path_to_storage(yaml_config)
 
-        # Get optimizer settings from config
-        with open(yaml_config, "r") as f:
-            config = yaml.safe_load(f)
+        from docetl.storage import get_default_backend as _get_backend
+        _backend = _get_backend()
+        with _backend.open(yaml_config, "r") as f:
+            raw_yaml = f.read()
+        config = yaml.safe_load(yaml_paths_to_storage(raw_yaml))
 
         optimizer_model = (
             config.get("optimizer_config", {})
@@ -365,7 +365,12 @@ async def cancel_decompose_task(task_id: str):
 @router.post("/run_pipeline")
 def run_pipeline(request: PipelineRequest) -> dict[str, Any]:
     try:
-        runner = DSLRunner.from_yaml(request.yaml_config)
+        # yaml_config may be a YAML string with HTTP /files/ URLs — rewrite and parse
+        storage_yaml = yaml_paths_to_storage(request.yaml_config)
+        parsed_config = yaml.safe_load(storage_yaml)
+        if not isinstance(parsed_config, dict):
+            raise ValueError("yaml_config must be a YAML string or a valid pipeline config")
+        runner = DSLRunner(parsed_config)
         cost = runner.load_run_save()
         runner.reset_env()
         return {"cost": cost, "message": "Pipeline executed successfully"}
@@ -387,7 +392,18 @@ async def websocket_run_pipeline(websocket: WebSocket, client_id: str):
     runner = None
     try:
         config = await websocket.receive_json()
-        runner = DSLRunner.from_yaml(config["yaml_config"])
+
+        # yaml_config is a file path (HTTP /files/ URL or local storage path).
+        # Read the file via the storage backend so the runner never sees HTTP URLs.
+        from docetl.storage import get_default_backend
+        backend = get_default_backend()
+        yaml_config_storage_path = rewrite_path_to_storage(config["yaml_config"])
+        with backend.open(yaml_config_storage_path, "r") as f:
+            raw_yaml = f.read()
+        # Belt-and-suspenders: rewrite any residual HTTP /files/ URLs → storage paths
+        storage_yaml = yaml_paths_to_storage(raw_yaml)
+        parsed_config = yaml.safe_load(storage_yaml)
+        runner = DSLRunner(parsed_config)
 
         if config.get("clear_intermediate", False):
             runner.clear_intermediate()
@@ -481,17 +497,16 @@ async def websocket_decompose(websocket: WebSocket, client_id: str):
 
     try:
         config = await websocket.receive_json()
-        yaml_config = config["yaml_config"]
+        yaml_config = rewrite_path_to_storage(config["yaml_config"])
         step_name = config["step_name"]
         op_name = config["op_name"]
 
-        # Validate yaml_config is a path
-        if not (yaml_config.endswith(".yaml") or yaml_config.endswith(".yml")):
-            raise ValueError("yaml_config must be a path to a YAML file")
-
-        # Get optimizer settings from config
-        with open(yaml_config, "r") as f:
-            pipeline_config = yaml.safe_load(f)
+        # Read via storage backend — runner/decomposer must never see HTTP URLs
+        from docetl.storage import get_default_backend as _get_backend
+        _backend = _get_backend()
+        with _backend.open(yaml_config, "r") as f:
+            raw_yaml = f.read()
+        pipeline_config = yaml.safe_load(yaml_paths_to_storage(raw_yaml))
 
         optimizer_model = (
             pipeline_config.get("optimizer_config", {})
