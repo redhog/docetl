@@ -467,16 +467,6 @@ class OpContainer:
 
                     return cached_data, 0, curr_logs, canonical_json_hash(cached_data)
 
-        # Try to load from checkpoint if available
-        # Skip if this operation has bypass_cache: true
-        if not is_build and not self.config.get("bypass_cache", False):
-            attempted_input_data, attempted_hash = self.runner._load_from_checkpoint_if_exists(
-                self.name.split("/")[0], self.name.split("/")[-1]
-            )
-            if attempted_input_data is not None:
-                curr_logs += f"[green]✓[/green] Using cached {self.name}\n"
-                return attempted_input_data, 0, curr_logs, attempted_hash
-
         # If there's a selectivity estimate, we need to take a sample of size sample_size_needed / selectivity
         if self.selectivity and sample_size_needed:
             input_sample_size_needed = int(
@@ -484,12 +474,6 @@ class OpContainer:
             )
         else:
             input_sample_size_needed = sample_size_needed
-
-        # Clear any existing checkpoint before running
-        if self.runner.intermediate_dir:
-            # Content-addressed paths are unique per hash — no need to delete stale files
-            # (they are simply never found again). We keep the no-op here for compatibility.
-            pass
 
         # Handle equijoin operations which have two input streams
         if self.is_equijoin:
@@ -515,6 +499,16 @@ class OpContainer:
             cost += input_cost
             curr_logs += input_logs
             input_len = len(input_data)
+
+        # Try to load from checkpoint if available (after getting upstream data so hash matches saved path)
+        # Skip if this operation has bypass_cache: true
+        if not is_build and not self.config.get("bypass_cache", False):
+            attempted_input_data, attempted_hash = self.runner._load_from_checkpoint_if_exists(
+                self.name.split("/")[0], self.name.split("/")[-1], upstream_data_hash
+            )
+            if attempted_input_data is not None:
+                curr_logs += f"[green]✓[/green] Using cached {self.name}\n"
+                return attempted_input_data, cost, curr_logs, attempted_hash
 
         # Apply sampling if configured
         if input_data and "sample" in self.config and not is_build:
