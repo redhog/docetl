@@ -80,7 +80,7 @@ async def run_optimization(task_id: str, yaml_config: str, step_name: str, op_na
         from docetl.storage import get_default_backend as _get_backend
         _backend = _get_backend()
         yaml_config_path = rewrite_path_to_storage(yaml_config)
-        with _backend.open(yaml_config_path, "r") as f:
+        with _backend.open(yaml_config_path, "r", bypass_cache=True) as f:
             raw_yaml = f.read()
         config = yaml.safe_load(yaml_paths_to_storage(raw_yaml))
 
@@ -241,7 +241,7 @@ async def run_decomposition(task_id: str, yaml_config: str, step_name: str, op_n
 
         from docetl.storage import get_default_backend as _get_backend
         _backend = _get_backend()
-        with _backend.open(yaml_config, "r") as f:
+        with _backend.open(yaml_config, "r", bypass_cache=True) as f:
             raw_yaml = f.read()
         config = yaml.safe_load(yaml_paths_to_storage(raw_yaml))
 
@@ -400,7 +400,7 @@ async def websocket_run_pipeline(websocket: WebSocket, client_id: str):
         from docetl.storage import get_default_backend
         backend = get_default_backend()
         yaml_config_storage_path = rewrite_path_to_storage(config["yaml_config"])
-        with backend.open(yaml_config_storage_path, "r") as f:
+        with backend.open(yaml_config_storage_path, "r", bypass_cache=True) as f:
             raw_yaml = f.read()
         # Belt-and-suspenders: rewrite any residual HTTP /files/ URLs → storage paths
         storage_yaml = yaml_paths_to_storage(raw_yaml)
@@ -499,10 +499,23 @@ async def websocket_run_pipeline(websocket: WebSocket, client_id: str):
         # Sleep for a short duration to ensure all output is captured
         await asyncio.sleep(3)
 
-        # Resolve actual output checkpoint path and convert to HTTP URL
+        # Resolve actual output path and convert to HTTP URL.
+        # Prefer the intermediate checkpoint for the last op (gives per-op view);
+        # fall back to the configured pipeline output path.
         last_checkpoint = runner.get_last_op_checkpoint_path()
-        output_path_http = storage_path_to_http(last_checkpoint) if last_checkpoint else None
+        if last_checkpoint:
+            output_path_http = storage_path_to_http(last_checkpoint)
+        else:
+            fallback = runner.get_output_path()
+            output_path_http = storage_path_to_http(fallback) if fallback else None
         print(f"[pipeline] last_checkpoint={last_checkpoint!r} -> output_path_http={output_path_http!r}")
+
+        # Convert all checkpoint paths to HTTP URLs: {op_name: http_url}
+        # Flatten across steps since op names are unique within a pipeline.
+        checkpoint_paths_http: dict[str, str] = {}
+        for step_ops in runner.checkpoint_paths.values():
+            for op_name, cp_path in step_ops.items():
+                checkpoint_paths_http[op_name] = storage_path_to_http(cp_path)
 
         await websocket.send_json(
             {
@@ -512,6 +525,7 @@ async def websocket_run_pipeline(websocket: WebSocket, client_id: str):
                     "cost": result,
                     "yaml_config": config["yaml_config"],
                     "output_path": output_path_http,
+                    "checkpoint_paths": checkpoint_paths_http,
                 },
             }
         )
@@ -562,7 +576,7 @@ async def websocket_decompose(websocket: WebSocket, client_id: str):
         # Read via storage backend — runner/decomposer must never see HTTP URLs
         from docetl.storage import get_default_backend as _get_backend
         _backend = _get_backend()
-        with _backend.open(yaml_config, "r") as f:
+        with _backend.open(yaml_config, "r", bypass_cache=True) as f:
             raw_yaml = f.read()
         pipeline_config = yaml.safe_load(yaml_paths_to_storage(raw_yaml))
 

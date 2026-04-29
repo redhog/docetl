@@ -511,11 +511,12 @@ class DSLRunner(ConfigWrapper):
 
         start_time = time.time()
 
+        actual_output_path = output_path
         if self.last_op_container:
             self.load()
             self.console.rule("[bold]Pipeline Execution[/bold]")
-            output, _, _, _ = self.last_op_container.next()
-            self.save(output)
+            output, _, _, output_data_hash = self.last_op_container.next()
+            actual_output_path = self.save(output, data_hash=output_data_hash) or output_path
 
         execution_time = time.time() - start_time
 
@@ -554,7 +555,7 @@ class DSLRunner(ConfigWrapper):
                 if self.intermediate_dir
                 else ""
             )
-            + f"Output: [dim]{output_path}[/dim]"
+            + f"Output: [dim]{actual_output_path}[/dim]"
         )
         self.console.log(Panel(summary, title="Execution Summary"))
 
@@ -607,15 +608,39 @@ class DSLRunner(ConfigWrapper):
         self.datasets["__empty__"] = Dataset(self, "memory", [{}])
         self.console.log()
 
-    def save(self, data: list[dict]) -> None:
+    def _content_addressed_output_path(self, base_path: str, data_hash: str) -> str:
+        """
+        Derive a content-addressed output path by inserting a short hash before the extension.
+
+        e.g. outputs/Untitled_Analysis.json -> outputs/Untitled_Analysis_a3f9c1b2d4e6.json
+        """
+        short = data_hash[:24]
+        if base_path.lower().endswith(".json"):
+            return base_path[:-5] + f"_{short}.json"
+        elif base_path.lower().endswith(".csv"):
+            return base_path[:-4] + f"_{short}.csv"
+        return base_path + f"_{short}"
+
+    def save(self, data: list[dict], data_hash: str | None = None) -> str:
         """
         Save the final output of the pipeline.
+
+        When *data_hash* is provided the output filename is content-addressed
+        (hash inserted before extension) so identical outputs always reuse the
+        same file and the intermediate cache is never invalidated.
+
+        Returns the actual path written.
         """
         self.get_output_path(require=True)
 
         output_config = self.config["pipeline"]["output"]
         if output_config["type"] == "file":
-            output_path = output_config["path"]
+            base_path = output_config["path"]
+            output_path = (
+                self._content_addressed_output_path(base_path, data_hash)
+                if data_hash
+                else base_path
+            )
             parent = storage_path_join(*output_path.replace("\\", "/").split("/")[:-1])
             if parent:
                 self.storage.makedirs(parent, exist_ok=True)
@@ -638,6 +663,7 @@ class DSLRunner(ConfigWrapper):
             self.console.log(
                 f"[green]✓[/green] Saved to [dim]{output_path}[/dim]\n"
             )
+            return output_path
         else:
             raise ValueError(
                 f"Unsupported output type: {output_config['type']}. Supported types: file"
