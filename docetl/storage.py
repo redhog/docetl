@@ -258,6 +258,12 @@ class StorageBackend:
     # Storage-relative path helpers (used by HTTP serving layer)
     # ------------------------------------------------------------------
 
+    def _scheme(self) -> str:
+        """Return the URL scheme of the remote root (e.g. 'gs', 's3', '' for local)."""
+        if "://" in self._remote_root:
+            return self._remote_root.split("://", 1)[0]
+        return ""
+
     def to_storage_relative(self, path: str) -> str | None:
         """
         Given an absolute/fsspec path, return the path relative to _fs_root,
@@ -268,31 +274,54 @@ class StorageBackend:
             path     = /home/alice/.docetl/ns/files/foo.json
             returns  = ns/files/foo.json
 
-        Example (s3):
-            _fs_root = my-bucket/docetl
-            path     = my-bucket/docetl/ns/files/foo.json
-            returns  = ns/files/foo.json
+        Example (gcs):
+            _remote_root = gs://my-bucket/docetl
+            _fs_root     = my-bucket/docetl
+            path         = gs://my-bucket/docetl/ns/files/foo.json
+            returns      = ns/files/foo.json
         """
+        # Normalise: strip scheme so we can compare against _fs_root (which has no scheme)
+        scheme = self._scheme()
+        if scheme and path.startswith(f"{scheme}://"):
+            path_no_scheme = path[len(scheme) + 3:]
+        else:
+            path_no_scheme = path
+
+        # rpath via _remote_path may reattach scheme; normalise that too
         rpath = self._remote_path(path)
+        if scheme and rpath.startswith(f"{scheme}://"):
+            rpath_no_scheme = rpath[len(scheme) + 3:]
+        else:
+            rpath_no_scheme = rpath
+
         root = self._fs_root.rstrip(self.fs.sep) + self.fs.sep
-        if rpath.startswith(root):
-            return rpath[len(root):]
+        if rpath_no_scheme.startswith(root):
+            return rpath_no_scheme[len(root):]
         # Also handle if path was already relative (no change needed)
-        if not os.path.isabs(path) and "://" not in path:
-            return path.lstrip("/")
+        if not os.path.isabs(path_no_scheme) and "://" not in path:
+            return path_no_scheme.lstrip("/")
         return None
 
     def from_storage_relative(self, rel: str) -> str:
         """
-        Given a path relative to the storage root, return the full fsspec path.
+        Given a path relative to the storage root, return the full fsspec path
+        (including scheme for remote filesystems).
 
-        Example:
+        Example (local):
             rel     = ns/files/foo.json
             returns = /home/alice/.docetl/ns/files/foo.json
+
+        Example (gcs):
+            _remote_root = gs://my-bucket/docetl
+            rel          = ns/files/foo.json
+            returns      = gs://my-bucket/docetl/ns/files/foo.json
         """
-        return self.fs.sep.join(
-            [self._fs_root.rstrip(self.fs.sep), rel.lstrip("/")]
-        )
+        scheme = self._scheme()
+        root = self._fs_root.rstrip(self.fs.sep)
+        path = self.fs.sep.join([root, rel.lstrip("/")])
+        if scheme:
+            return f"{scheme}://{path}"
+        return path
 
 
 # ---------------------------------------------------------------------------
