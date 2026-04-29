@@ -16,10 +16,10 @@ export async function GET(req: NextRequest) {
   }
 
   try {
+    // filePath is always an HTTP URL served by the backend (e.g. http://localhost:8000/files/...)
+    // Pass it directly to the backend pagination endpoint.
     const response = await fetch(
-      `${FASTAPI_URL}/fs/read-file-page?path=${encodeURIComponent(
-        filePath
-      )}&page=${page}&chunk_size=${CHUNK_SIZE}`
+      `${FASTAPI_URL}/fs/read-file-page?path=${encodeURIComponent(filePath)}&page=${page}&chunk_size=${CHUNK_SIZE}`
     );
 
     if (!response.ok) {

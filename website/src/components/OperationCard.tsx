@@ -740,6 +740,7 @@ export const OperationCard: React.FC<Props> = ({ index, id, forceExpanded, force
     apiKeys,
     extraPipelineSettings,
     onRequestDecompositionRef,
+    checkpointPaths,
   } = usePipelineContext();
   const { toast } = useToast();
 
@@ -839,56 +840,34 @@ export const OperationCard: React.FC<Props> = ({ index, id, forceExpanded, force
     }
   }, [operation, onRequestDecompositionRef, toast]);
 
-  const onShowOutput = useCallback(async () => {
+  const onShowOutput = useCallback(() => {
     if (!operation) return;
 
-    try {
-      const response = await fetch("/api/getInputOutput", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          default_model: defaultModel,
-          data: { path: currentFile?.path || "" },
-          operations,
-          operation_id: operation.id,
-          name: pipelineName,
-          sample_size: sampleSize,
-          namespace,
-          extraPipelineSettings,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to get input and output paths");
-      }
-
-      const { inputPath, outputPath } = await response.json();
-
-      setOutput({
-        operationId: operation.id,
-        path: outputPath,
-        inputPath: inputPath,
-      });
-    } catch (error) {
-      console.error("Error fetching input and output paths:", error);
+    const outputPath = checkpointPaths[operation.name];
+    if (!outputPath) {
       toast({
-        title: "Error",
-        description: "Failed to get input and output paths",
+        title: "No output available",
+        description: "Run the pipeline first to view operation output.",
         variant: "destructive",
       });
+      return;
     }
-  }, [
-    operation,
-    defaultModel,
-    currentFile,
-    operations,
-    pipelineName,
-    sampleSize,
-    setOutput,
-    toast,
-  ]);
+
+    // Input is the checkpoint of the previous operation, or the dataset
+    const opIndex = operations.findIndex((op) => op.id === operation.id);
+    let inputPath: string | undefined;
+    if (opIndex > 0) {
+      inputPath = checkpointPaths[operations[opIndex - 1].name];
+    } else {
+      inputPath = currentFile?.path || undefined;
+    }
+
+    setOutput({
+      operationId: operation.id,
+      path: outputPath,
+      inputPath,
+    });
+  }, [operation, checkpointPaths, operations, currentFile, setOutput, toast]);
 
   const handleAIEdit = useCallback(
     async (instruction: string) => {

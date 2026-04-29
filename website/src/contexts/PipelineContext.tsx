@@ -43,6 +43,8 @@ interface PipelineState {
   namespace: string | null;
   apiKeys: APIKey[];
   extraPipelineSettings: Record<string, unknown> | null;
+  // Map of op name → HTTP URL for each checkpoint written in the last run
+  checkpointPaths: Record<string, string>;
 }
 
 interface PipelineContextType extends PipelineState {
@@ -85,6 +87,7 @@ interface PipelineContextType extends PipelineState {
   setExtraPipelineSettings: React.Dispatch<
     React.SetStateAction<Record<string, unknown> | null>
   >;
+  setCheckpointPaths: React.Dispatch<React.SetStateAction<Record<string, string>>>;
   // Ref for triggering decomposition from OperationCard (using ref to avoid infinite loops)
   onRequestDecompositionRef: React.MutableRefObject<
     ((operationId: string, operationName: string) => void) | null
@@ -116,6 +119,7 @@ const defaultState = (namespace: string | null): PipelineState => ({
   namespace,
   apiKeys: [],
   extraPipelineSettings: null,
+  checkpointPaths: {},
 });
 
 const PERSISTED_KEYS: (keyof PipelineState)[] = [
@@ -135,6 +139,7 @@ const PERSISTED_KEYS: (keyof PipelineState)[] = [
   "highLevelGoal",
   "systemPrompt",
   "extraPipelineSettings",
+  "checkpointPaths",
 ];
 
 function stateToYaml(state: PipelineState): string {
@@ -165,9 +170,7 @@ const serializeState = async (state: PipelineState): Promise<string> => {
 
   if (state.output?.path) {
     try {
-      const outputResponse = await fetch(
-        `/api/readFile?path=${state.output.path}`
-      );
+      const outputResponse = await fetch(state.output.path);
       if (!outputResponse.ok) {
         throw new Error("Failed to fetch output file");
       }
@@ -501,6 +504,10 @@ export const PipelineProvider: React.FC<{
     ),
     setExtraPipelineSettings: useCallback(
       (value) => setStateAndUpdate("extraPipelineSettings", value),
+      [setStateAndUpdate]
+    ),
+    setCheckpointPaths: useCallback(
+      (value) => setStateAndUpdate("checkpointPaths", value),
       [setStateAndUpdate]
     ),
     onRequestDecompositionRef,

@@ -581,9 +581,7 @@ export const Output = memo(() => {
           operation?.otherKwargs?.prompts?.[0]?.output_keys;
         try {
           // Fetch output data
-          const outputResponse = await fetch(
-            `/api/readFile?path=${output.path}`
-          );
+          const outputResponse = await fetch(output.path);
           if (!outputResponse.ok) {
             throw new Error("Failed to fetch output file");
           }
@@ -631,9 +629,7 @@ export const Output = memo(() => {
           if (isFirstOperation && sampleSize !== null) {
             setInputCount(sampleSize);
           } else if (output.inputPath) {
-            const inputResponse = await fetch(
-              `/api/readFile?path=${output.inputPath}`
-            );
+            const inputResponse = await fetch(output.inputPath);
             if (!inputResponse.ok) {
               throw new Error("Failed to fetch input file");
             }

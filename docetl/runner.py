@@ -140,6 +140,10 @@ class DSLRunner(ConfigWrapper):
         )
         # Storage backend — uses env vars DOCETL_STORAGE_URL / DOCETL_CACHE_DIR by default
         self.storage = get_default_backend()
+        # Tracks the last checkpoint path written (set by _save_checkpoint)
+        self.last_written_checkpoint_path: str | None = None
+        # Tracks all checkpoint paths written: {step_name: {op_name: path}}
+        self.checkpoint_paths: dict[str, dict[str, str]] = {}
 
     def _setup_parsing_tools(self) -> None:
         """Set up parsing tools from configuration"""
@@ -345,27 +349,9 @@ class DSLRunner(ConfigWrapper):
 
     def get_last_op_checkpoint_path(self) -> str | None:
         """
-        Return the storage path of the most recent checkpoint written for the last
-        operation in the pipeline, or None if not determinable.
+        Return the storage path of the checkpoint written for the last operation.
         """
-        if not self.intermediate_dir:
-            return None
-        # Find the last step and its last operation from config
-        steps = self.config.get("pipeline", {}).get("steps", [])
-        if not steps:
-            return None
-        last_step = steps[-1]
-        step_name = last_step["name"]
-        ops = last_step.get("operations", [])
-        if not ops:
-            return None
-        last_op = ops[-1]
-        op_name = last_op if isinstance(last_op, str) else list(last_op.keys())[0]
-        pattern = storage_path_join(self.intermediate_dir, step_name, f"{op_name}_*.json")
-        matches = self.storage.glob(pattern)
-        if not matches:
-            return None
-        return sorted(matches)[-1]
+        return self.last_written_checkpoint_path
 
     def get_output_path(self, require=False):
         output_path = self.config.get("pipeline", {}).get("output", {}).get("path")
@@ -755,6 +741,11 @@ class DSLRunner(ConfigWrapper):
 
         with self.storage.open(checkpoint_path, "w") as f:
             json.dump(data, f)
+
+        self.last_written_checkpoint_path = checkpoint_path
+        if step_name not in self.checkpoint_paths:
+            self.checkpoint_paths[step_name] = {}
+        self.checkpoint_paths[step_name][operation_name] = checkpoint_path
 
         self.console.log(
             f"[green]✓ [italic]Intermediate saved for operation '{operation_name}' "

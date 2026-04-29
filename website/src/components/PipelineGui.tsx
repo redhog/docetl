@@ -269,6 +269,7 @@ const PipelineGUI: React.FC = () => {
     isDecomposing,
     setIsDecomposing,
     onRequestDecompositionRef,
+    setCheckpointPaths,
   } = usePipelineContext();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [expandedCards, setExpandedCards] = useState<Record<string, boolean>>({});
@@ -511,8 +512,15 @@ const PipelineGUI: React.FC = () => {
         const runCost = lastMessage.data.cost || 0;
 
         // Update output path to the actual checkpoint written by the runner
-        if (lastMessage.data.output_path && output) {
-          setOutput({ ...output, path: lastMessage.data.output_path });
+        if (lastMessage.data.output_path) {
+          setOutput((prev) =>
+            prev ? { ...prev, path: lastMessage.data.output_path } : prev
+          );
+        }
+
+        // Store all checkpoint paths from this run (op name → HTTP URL)
+        if (lastMessage.data.checkpoint_paths) {
+          setCheckpointPaths(lastMessage.data.checkpoint_paths);
         }
 
         // Trigger should_optimize check for the last operation if enabled

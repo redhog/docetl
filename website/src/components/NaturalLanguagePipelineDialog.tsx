@@ -367,9 +367,7 @@ const NaturalLanguagePipelineDialog: React.FC<
         datasetFile?.path
       ) {
         try {
-          const response = await fetch(
-            `/api/readFile?path=${encodeURIComponent(datasetFile.path)}`
-          );
+          const response = await fetch(datasetFile.path);
           if (response.ok) {
             const text = await response.text();
             const extension =
