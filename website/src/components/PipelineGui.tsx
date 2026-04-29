@@ -270,6 +270,7 @@ const PipelineGUI: React.FC = () => {
     setIsDecomposing,
     onRequestDecompositionRef,
     setCheckpointPaths,
+    saveProgress,
   } = usePipelineContext();
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [expandedCards, setExpandedCards] = useState<Record<string, boolean>>({});
@@ -734,6 +735,9 @@ const PipelineGUI: React.FC = () => {
       setTerminalOutput("");
 
       try {
+        // Save workspace before running
+        await saveProgress();
+
         // Get the latest API keys from context
         const currentApiKeys = apiKeys;
 
