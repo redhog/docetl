@@ -390,6 +390,8 @@ async def websocket_run_pipeline(websocket: WebSocket, client_id: str):
     """
     await websocket.accept()
     runner = None
+    _log_handler = None
+    _root_logger = None
     try:
         config = await websocket.receive_json()
 
@@ -407,6 +409,29 @@ async def websocket_run_pipeline(websocket: WebSocket, client_id: str):
 
         if config.get("clear_intermediate", False):
             runner.clear_intermediate()
+
+        # Capture logging ERROR+ records into the runner console so they appear
+        # in the terminal view and we can detect fatal background errors.
+        import logging
+        import traceback as tb_module
+
+        class _ConsoleLogHandler(logging.Handler):
+            def __init__(self, console):
+                super().__init__(level=logging.ERROR)
+                self._console = console
+                self.fatal_error: str | None = None
+
+            def emit(self, record):
+                msg = self.format(record)
+                if record.exc_info:
+                    msg += "\n" + "".join(tb_module.format_exception(*record.exc_info))
+                self._console.print(f"[red]{msg}[/red]")
+                if self.fatal_error is None:
+                    self.fatal_error = msg
+
+        _log_handler = _ConsoleLogHandler(runner.console)
+        _root_logger = logging.getLogger()
+        _root_logger.addHandler(_log_handler)
 
         async def run_pipeline():
             return await asyncio.to_thread(runner.load_run_save)
@@ -426,6 +451,7 @@ async def websocket_run_pipeline(websocket: WebSocket, client_id: str):
                 if user_message == "kill":
                     runner.console.log("Stopping process...")
                     runner.is_cancelled = True
+                    pipeline_task.cancel()
 
                     await websocket.send_json({
                         "type": "error",
@@ -438,11 +464,28 @@ async def websocket_run_pipeline(websocket: WebSocket, client_id: str):
             except asyncio.TimeoutError:
                 pass  # No message received, continue with the loop
             except asyncio.CancelledError:
+                pipeline_task.cancel()
                 await websocket.send_json({
                     "type": "error",
                     "message": "Process stopped by user request"
                 })
                 raise
+            except WebSocketDisconnect:
+                pipeline_task.cancel()
+                raise
+
+            # If a fatal error was logged (e.g. gRPC auth failure in background
+            # thread), report it and stop waiting — the task may never complete.
+            if _log_handler.fatal_error is not None and not pipeline_task.done():
+                pipeline_task.cancel()
+                console_output = runner.console.file.getvalue()
+                if console_output:
+                    await websocket.send_json({"type": "output", "data": console_output})
+                await websocket.send_json({
+                    "type": "error",
+                    "data": _log_handler.fatal_error,
+                })
+                return
 
             await asyncio.sleep(0.5)
 
@@ -481,10 +524,19 @@ async def websocket_run_pipeline(websocket: WebSocket, client_id: str):
 
         error_traceback = traceback.format_exc()
         print(f"Error occurred:\n{error_traceback}")
+        # Flush any remaining console output first, then append traceback
+        if runner is not None:
+            console_output = runner.console.file.getvalue()
+        else:
+            console_output = ""
+        full_output = console_output + "\n" + error_traceback if console_output else error_traceback
+        await websocket.send_json({"type": "output", "data": full_output})
         await websocket.send_json({"type": "error", "data": str(e), "traceback": error_traceback})
     finally:
         if runner is not None:
             runner.reset_env()
+        if _log_handler is not None and _root_logger is not None:
+            _root_logger.removeHandler(_log_handler)
         await websocket.close()
 
 
