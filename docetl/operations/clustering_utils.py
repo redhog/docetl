@@ -11,10 +11,27 @@ from docetl.operations.utils.validation import lookup_field
 from docetl.utils import completion_cost
 
 
+_PROVIDER_DEFAULT_EMBEDDING_MODELS = {
+    "vertex_ai": "vertex_ai/text-embedding-004",
+    "azure": "azure/text-embedding-3-small",
+    "anthropic": "text-embedding-3-small",
+}
+
+
+def _default_embedding_model(api_wrapper: APIWrapper) -> str:
+    """Derive a sensible default embedding model from the runner's default_model."""
+    default_model = api_wrapper.runner.config.get("default_model", "")
+    if "/" in default_model:
+        provider = default_model.split("/")[0]
+        if provider in _PROVIDER_DEFAULT_EMBEDDING_MODELS:
+            return _PROVIDER_DEFAULT_EMBEDDING_MODELS[provider]
+    return "text-embedding-3-small"
+
+
 def get_embeddings_for_clustering(
     items: list[dict], sampling_config: dict, api_wrapper: APIWrapper
 ) -> tuple[list[list[float]], float]:
-    embedding_model = sampling_config.get("embedding_model", "text-embedding-3-small")
+    embedding_model = sampling_config.get("embedding_model") or _default_embedding_model(api_wrapper)
     embedding_keys = sampling_config.get("embedding_keys")
     if not embedding_keys:
         embedding_keys = list(items[0].keys())

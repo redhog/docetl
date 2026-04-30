@@ -306,7 +306,7 @@ class RankOperation(BaseOperation):
         input_keys = self.config["input_keys"]
         direction = self.config["direction"].lower()
         self.config.get("model", self.default_model)
-        embedding_model = self.config.get("embedding_model", "text-embedding-3-small")
+        embedding_model = self.config.get("embedding_model", self.default_embedding_model)
 
         total_cost = 0
         ratings = {}
@@ -997,7 +997,7 @@ class RankOperation(BaseOperation):
         from sklearn.metrics.pairwise import cosine_similarity
 
         input_keys = self.config["input_keys"]
-        embedding_model = self.config.get("embedding_model", "text-embedding-3-small")
+        embedding_model = self.config.get("embedding_model", self.default_embedding_model)
         total_cost = 0
 
         document_contents = [

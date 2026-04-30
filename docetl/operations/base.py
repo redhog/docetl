@@ -107,6 +107,12 @@ class BaseOperation(ABC, metaclass=BaseOperationMeta):
         """
         pass
 
+    @property
+    def default_embedding_model(self) -> str:
+        """Return a sensible default embedding model based on the default_model's provider."""
+        from docetl.operations.clustering_utils import _default_embedding_model
+        return _default_embedding_model(self.runner.api)
+
     def syntax_check(self, context: dict[str, Any] | None = None) -> None:
         """Perform syntax checks on the operation configuration."""
         # Validate the configuration using Pydantic

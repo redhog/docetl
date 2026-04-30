@@ -77,8 +77,9 @@ class RuntimeBlockingOptimizer:
         Returns:
             Tuple of (embeddings list, total cost).
         """
+        from docetl.operations.clustering_utils import _default_embedding_model
         embedding_model = embedding_model or self.config.get(
-            "embedding_model", "text-embedding-3-small"
+            "embedding_model", _default_embedding_model(self.runner.api)
         )
         model_input_context_length = model_cost.get(embedding_model, {}).get(
             "max_input_tokens", 8192

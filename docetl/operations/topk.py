@@ -163,7 +163,7 @@ class TopKOperation(BaseOperation):
         # Add embedding model for embedding method
         if self.config["method"] == "embedding":
             sample_config["method_kwargs"]["embedding_model"] = self.config.get(
-                "embedding_model", "text-embedding-3-small"
+                "embedding_model", self.default_embedding_model
             )
 
         # Add any additional config like random_state, bypass_cache

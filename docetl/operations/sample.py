@@ -478,7 +478,7 @@ class SampleOperation(BaseOperation):
         # Get embeddings for all items
         embedding_config = {
             "embedding_keys": keys,
-            "embedding_model": config.get("embedding_model", "text-embedding-3-small"),
+            "embedding_model": config.get("embedding_model"),
         }
         embeddings, cost = get_embeddings_for_clustering(
             input_data, embedding_config, self.runner.api

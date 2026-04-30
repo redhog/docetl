@@ -77,6 +77,7 @@ interface OtherKwargs {
   stratify_key?: string;
   // cluster
   embedding_keys?: string[];
+  embedding_model?: string;
   summary_schema?: Record<string, string>;
   summary_prompt?: string;
   output_key?: string;
@@ -2501,6 +2502,22 @@ export const ClusterOperationComponent: React.FC<OperationComponentProps> = ({
             <Plus size={16} />
           </Button>
         </div>
+      </div>
+
+      <div>
+        <Label htmlFor="cluster-embedding-model" className="text-sm font-medium block mb-1">
+          Embedding Model
+        </Label>
+        <Input
+          id="cluster-embedding-model"
+          value={operation.otherKwargs?.embedding_model || ""}
+          onChange={(e) => update({ embedding_model: e.target.value || undefined })}
+          placeholder="auto (e.g. vertex_ai/text-embedding-004)"
+          className="w-72"
+        />
+        <p className="text-xs text-muted-foreground mt-1">
+          Leave blank to auto-select based on your pipeline&apos;s default model provider.
+        </p>
       </div>
 
       <div>
