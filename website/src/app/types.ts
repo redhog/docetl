@@ -26,7 +26,12 @@ export type Operation = {
     | "code_reduce"
     | "code_filter"
     | "web_fetch"
-    | "web_search";
+    | "web_search"
+    | "cluster"
+    | "equijoin"
+    | "topk"
+    | "link_resolve"
+    | "add_uuid";
   name: string;
   prompt?: string;
   output?: { schema: SchemaItem[] };

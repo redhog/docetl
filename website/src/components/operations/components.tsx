@@ -65,24 +65,24 @@ interface OtherKwargs {
   comparison_prompt?: string;
   resolution_prompt?: string;
   blocking_threshold?: number;
-  blocking_keys?: string[];
-  split_key?: string;
-  unnest_key?: string;
-  recursive?: boolean;
-  depth?: number;
-  content_key?: string;
-  doc_id_key?: string;
-  order_key?: string;
-  peripheral_chunks?: PeripheralChunks;
-  samples?: string | number;
-  code?: string;
-  document_keys?: string[];
-  extraction_method?: string;
-  format_extraction?: boolean;
-  direction?: string;
-  rerank_call_budget?: number;
-  input_keys?: string[];
-  pdf_url_key?: string;
+  blocking_keys?: string[] | { left: string[]; right: string[] };
+  comparison_model?: string;
+  limits?: { left: number; right: number };
+  // add_uuid
+  id_key?: string;
+  // topk
+  k?: number;
+  keys?: string[];
+  query?: string;
+  stratify_key?: string;
+  // cluster
+  embedding_keys?: string[];
+  summary_schema?: Record<string, string>;
+  summary_prompt?: string;
+  output_key?: string;
+  collapse?: number;
+  // link_resolve
+  link_key?: string;
 }
 
 interface OperationComponentProps {
@@ -2315,6 +2315,526 @@ export const WebSearchOperationComponent: React.FC<OperationComponentProps> = ({
   );
 };
 
+// ─── AddUuid ────────────────────────────────────────────────────────────────
+export const AddUuidOperationComponent: React.FC<OperationComponentProps> = ({
+  operation,
+  onUpdate,
+}) => {
+  return (
+    <div className="space-y-4">
+      <div>
+        <Label htmlFor="id-key" className="text-sm font-medium block mb-1">
+          ID Key (optional)
+        </Label>
+        <Input
+          id="id-key"
+          value={operation.otherKwargs?.id_key || ""}
+          onChange={(e) =>
+            onUpdate({
+              ...operation,
+              otherKwargs: { ...operation.otherKwargs, id_key: e.target.value || undefined },
+            })
+          }
+          placeholder={`${operation.name}_id`}
+          className="w-64"
+        />
+        <p className="text-xs text-muted-foreground mt-1">
+          Name of the field to write the UUID into. Defaults to{" "}
+          <code>{operation.name}_id</code>.
+        </p>
+      </div>
+    </div>
+  );
+};
+
+// ─── TopK ────────────────────────────────────────────────────────────────────
+export const TopKOperationComponent: React.FC<OperationComponentProps> = ({
+  operation,
+  onUpdate,
+}) => {
+  const method = operation.otherKwargs?.method || "embedding";
+
+  const update = (patch: Partial<OtherKwargs>) =>
+    onUpdate({ ...operation, otherKwargs: { ...operation.otherKwargs, ...patch } });
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <Label className="text-sm font-medium block mb-1">Method</Label>
+          <Select value={method} onValueChange={(v) => update({ method: v })}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="embedding">Embedding (cosine similarity)</SelectItem>
+              <SelectItem value="fts">Full-text search (BM25)</SelectItem>
+              <SelectItem value="llm_compare">LLM Compare</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div>
+          <Label htmlFor="topk-k" className="text-sm font-medium block mb-1">K</Label>
+          <Input
+            id="topk-k"
+            type="number"
+            min={1}
+            value={operation.otherKwargs?.k ?? ""}
+            onChange={(e) => update({ k: parseInt(e.target.value) || undefined })}
+            placeholder="e.g. 10"
+          />
+        </div>
+      </div>
+
+      <div>
+        <Label className="text-sm font-medium block mb-1">Query</Label>
+        <Input
+          value={operation.otherKwargs?.query || ""}
+          onChange={(e) => update({ query: e.target.value })}
+          placeholder={method === "llm_compare" ? "Plain text query" : "Jinja2 template or plain text"}
+        />
+        {method === "llm_compare" && (
+          <p className="text-xs text-muted-foreground mt-1">
+            For llm_compare, query must be plain text (no Jinja2 templates).
+          </p>
+        )}
+      </div>
+
+      <div>
+        <Label className="text-sm font-medium block mb-2">Keys (fields to embed/search)</Label>
+        <div className="flex flex-wrap gap-2">
+          {(operation.otherKwargs?.keys || []).map((k, i) => (
+            <div key={i} className="flex items-center">
+              <Input
+                value={k}
+                onChange={(e) => {
+                  const nk = [...(operation.otherKwargs?.keys || [])];
+                  nk[i] = e.target.value;
+                  update({ keys: nk });
+                }}
+                className="w-36"
+                placeholder="field name"
+              />
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  const nk = [...(operation.otherKwargs?.keys || [])];
+                  nk.splice(i, 1);
+                  update({ keys: nk });
+                }}
+              >
+                <X size={12} />
+              </Button>
+            </div>
+          ))}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => update({ keys: [...(operation.otherKwargs?.keys || []), ""] })}
+          >
+            <Plus size={16} />
+          </Button>
+        </div>
+      </div>
+
+      {method !== "llm_compare" && (
+        <div>
+          <Label className="text-sm font-medium block mb-1">Stratify Key (optional)</Label>
+          <Input
+            value={operation.otherKwargs?.stratify_key || ""}
+            onChange={(e) => update({ stratify_key: e.target.value || undefined })}
+            placeholder="field to stratify sampling by"
+            className="w-64"
+          />
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── Cluster ─────────────────────────────────────────────────────────────────
+export const ClusterOperationComponent: React.FC<OperationComponentProps> = ({
+  operation,
+  onUpdate,
+}) => {
+  const update = (patch: Partial<OtherKwargs>) =>
+    onUpdate({ ...operation, otherKwargs: { ...operation.otherKwargs, ...patch } });
+
+  const summarySchema: Record<string, string> = operation.otherKwargs?.summary_schema || {};
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <Label className="text-sm font-medium block mb-2">Embedding Keys</Label>
+        <div className="flex flex-wrap gap-2">
+          {(operation.otherKwargs?.embedding_keys || []).map((k, i) => (
+            <div key={i} className="flex items-center">
+              <Input
+                value={k}
+                onChange={(e) => {
+                  const nk = [...(operation.otherKwargs?.embedding_keys || [])];
+                  nk[i] = e.target.value;
+                  update({ embedding_keys: nk });
+                }}
+                className="w-36"
+                placeholder="field name"
+              />
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  const nk = [...(operation.otherKwargs?.embedding_keys || [])];
+                  nk.splice(i, 1);
+                  update({ embedding_keys: nk });
+                }}
+              >
+                <X size={12} />
+              </Button>
+            </div>
+          ))}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => update({ embedding_keys: [...(operation.otherKwargs?.embedding_keys || []), ""] })}
+          >
+            <Plus size={16} />
+          </Button>
+        </div>
+      </div>
+
+      <div>
+        <Label className="text-sm font-medium block mb-1">Summary Prompt</Label>
+        <PromptInput
+          prompt={operation.otherKwargs?.summary_prompt || ""}
+          onChange={(v) => update({ summary_prompt: v })}
+          placeholder="Prompt for LLM to summarize each cluster node"
+        />
+        <p className="text-xs text-muted-foreground mt-1">
+          Rendered once per internal cluster node with <code>{"{{ inputs }}"}</code> — a list of
+          that node&apos;s children. Children are either original leaf documents (with all their
+          fields) or already-summarized sub-cluster nodes (carrying only the Summary Schema fields).
+          Branch on which you have, e.g.:
+          <code className="block mt-1 whitespace-pre-wrap">{
+`{% for item in inputs %}
+- {% if item.engines is defined %}
+  {{ item.engines.type }}: {{ item.engines.description }}
+  {% else %}
+  {{ item.label }}: {{ item.summary }}
+  {% endif %}
+{% endfor %}`
+          }</code>
+          Use any field that exists only on leaf documents as the sentinel (e.g.{" "}
+          <code>item.engines is defined</code>).
+        </p>
+      </div>
+
+      <div>
+        <Label className="text-sm font-medium block mb-2">Summary Schema</Label>
+        <p className="text-xs text-muted-foreground mb-2">
+          Key-value pairs where keys are field names and values are types (string, int, float, boolean).
+        </p>
+        <div className="space-y-2">
+          {Object.entries(summarySchema).map(([k, v], i) => (
+            <div key={i} className="flex items-center gap-2">
+              <Input
+                value={k}
+                onChange={(e) => {
+                  const ns = { ...summarySchema };
+                  const val = ns[k];
+                  delete ns[k];
+                  ns[e.target.value] = val;
+                  update({ summary_schema: ns });
+                }}
+                className="w-36"
+                placeholder="field name"
+              />
+              <Input
+                value={v}
+                onChange={(e) => {
+                  const ns = { ...summarySchema, [k]: e.target.value };
+                  update({ summary_schema: ns });
+                }}
+                className="w-28"
+                placeholder="type"
+              />
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  const ns = { ...summarySchema };
+                  delete ns[k];
+                  update({ summary_schema: ns });
+                }}
+              >
+                <X size={12} />
+              </Button>
+            </div>
+          ))}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => update({ summary_schema: { ...summarySchema, "": "string" } })}
+          >
+            <Plus size={16} /> Add field
+          </Button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <Label htmlFor="cluster-output-key" className="text-sm font-medium block mb-1">
+            Output Key
+          </Label>
+          <Input
+            id="cluster-output-key"
+            value={operation.otherKwargs?.output_key || ""}
+            onChange={(e) => update({ output_key: e.target.value || undefined })}
+            placeholder="clusters"
+            className="w-48"
+          />
+        </div>
+        <div>
+          <Label htmlFor="cluster-collapse" className="text-sm font-medium block mb-1">
+            Collapse (optional)
+          </Label>
+          <Input
+            id="cluster-collapse"
+            type="number"
+            min={0}
+            max={1}
+            step={0.01}
+            value={operation.otherKwargs?.collapse ?? ""}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              update({ collapse: isNaN(v) ? undefined : v });
+            }}
+            placeholder="0.0–1.0"
+            className="w-32"
+          />
+          <p className="text-xs text-muted-foreground mt-1">
+            Fraction of tree distances used as collapse threshold.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── LinkResolve ─────────────────────────────────────────────────────────────
+export const LinkResolveOperationComponent: React.FC<OperationComponentProps> = ({
+  operation,
+  onUpdate,
+}) => {
+  const update = (patch: Partial<OtherKwargs>) =>
+    onUpdate({ ...operation, otherKwargs: { ...operation.otherKwargs, ...patch } });
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <Label className="text-sm font-medium block mb-1">Comparison Prompt</Label>
+        <PromptInput
+          prompt={operation.otherKwargs?.comparison_prompt || ""}
+          onChange={(v) => update({ comparison_prompt: v })}
+          placeholder="Prompt for LLM to compare two entities"
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <Label htmlFor="lr-id-key" className="text-sm font-medium block mb-1">ID Key</Label>
+          <Input
+            id="lr-id-key"
+            value={operation.otherKwargs?.id_key || ""}
+            onChange={(e) => update({ id_key: e.target.value || undefined })}
+            placeholder="title"
+            className="w-48"
+          />
+          <p className="text-xs text-muted-foreground mt-1">
+            Field containing canonical entity IDs.
+          </p>
+        </div>
+        <div>
+          <Label htmlFor="lr-link-key" className="text-sm font-medium block mb-1">Link Key</Label>
+          <Input
+            id="lr-link-key"
+            value={operation.otherKwargs?.link_key || ""}
+            onChange={(e) => update({ link_key: e.target.value || undefined })}
+            placeholder="related_to"
+            className="w-48"
+          />
+          <p className="text-xs text-muted-foreground mt-1">
+            Field containing list of string links to resolve.
+          </p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <Label htmlFor="lr-threshold" className="text-sm font-medium block mb-1">
+            Blocking Threshold
+          </Label>
+          <Input
+            id="lr-threshold"
+            type="number"
+            min={0}
+            max={1}
+            step={0.01}
+            value={operation.otherKwargs?.blocking_threshold ?? ""}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              update({ blocking_threshold: isNaN(v) ? undefined : v });
+            }}
+            placeholder="e.g. 0.8"
+            className="w-32"
+          />
+        </div>
+      </div>
+
+      <div>
+        <Label className="text-sm font-medium block mb-2">Blocking Conditions</Label>
+        <div className="flex flex-wrap gap-2">
+          {(operation.otherKwargs?.blocking_keys || []).map((k, i) => (
+            <div key={i} className="flex items-center">
+              <Input
+                value={k}
+                onChange={(e) => {
+                  const nk = [...(operation.otherKwargs?.blocking_keys || [])];
+                  nk[i] = e.target.value;
+                  update({ blocking_keys: nk });
+                }}
+                className="w-60"
+                placeholder="Python expression"
+              />
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  const nk = [...(operation.otherKwargs?.blocking_keys || [])];
+                  nk.splice(i, 1);
+                  update({ blocking_keys: nk });
+                }}
+              >
+                <X size={12} />
+              </Button>
+            </div>
+          ))}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => update({ blocking_keys: [...(operation.otherKwargs?.blocking_keys || []), ""] })}
+          >
+            <Plus size={16} />
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── Equijoin ─────────────────────────────────────────────────────────────────
+export const EquijoinOperationComponent: React.FC<OperationComponentProps> = ({
+  operation,
+  isSchemaExpanded,
+  onUpdate,
+  onToggleSchema,
+}) => {
+  const update = (patch: Partial<OtherKwargs>) =>
+    onUpdate({ ...operation, otherKwargs: { ...operation.otherKwargs, ...patch } });
+
+  const schemaItems = operation?.output?.schema || [];
+  const bk = (operation.otherKwargs?.blocking_keys as { left: string[]; right: string[] } | undefined) || { left: [], right: [] };
+
+  const updateBlockingKeys = (side: "left" | "right", keys: string[]) => {
+    update({ blocking_keys: { ...bk, [side]: keys } });
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <Label className="text-sm font-medium block mb-1">Comparison Prompt</Label>
+        <PromptInput
+          prompt={operation.otherKwargs?.comparison_prompt || ""}
+          onChange={(v) => update({ comparison_prompt: v })}
+          placeholder="Prompt for LLM to compare a left and right document"
+        />
+      </div>
+
+      <div>
+        <Label htmlFor="ej-threshold" className="text-sm font-medium block mb-1">
+          Blocking Threshold
+        </Label>
+        <Input
+          id="ej-threshold"
+          type="number"
+          min={0}
+          max={1}
+          step={0.01}
+          value={operation.otherKwargs?.blocking_threshold ?? ""}
+          onChange={(e) => {
+            const v = parseFloat(e.target.value);
+            update({ blocking_threshold: isNaN(v) ? undefined : v });
+          }}
+          placeholder="e.g. 0.8"
+          className="w-32"
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-6">
+        {(["left", "right"] as const).map((side) => (
+          <div key={side}>
+            <Label className="text-sm font-medium block mb-2 capitalize">
+              {side} Blocking Keys
+            </Label>
+            <div className="flex flex-col gap-2">
+              {(bk[side] || []).map((k, i) => (
+                <div key={i} className="flex items-center gap-1">
+                  <Input
+                    value={k}
+                    onChange={(e) => {
+                      const nk = [...(bk[side] || [])];
+                      nk[i] = e.target.value;
+                      updateBlockingKeys(side, nk);
+                    }}
+                    className="w-36"
+                    placeholder="field name"
+                  />
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      const nk = [...(bk[side] || [])];
+                      nk.splice(i, 1);
+                      updateBlockingKeys(side, nk);
+                    }}
+                  >
+                    <X size={12} />
+                  </Button>
+                </div>
+              ))}
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => updateBlockingKeys(side, [...(bk[side] || []), ""])}
+                className="w-fit"
+              >
+                <Plus size={16} />
+              </Button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <OutputSchema
+        schema={schemaItems}
+        onUpdate={(s) => onUpdate({ ...operation, output: { ...operation.output, schema: s } })}
+        isExpanded={isSchemaExpanded}
+        onToggle={onToggleSchema}
+      />
+    </div>
+  );
+};
+
 export default function createOperationComponent(
   operation: Operation,
   onUpdate: (updatedOperation: Operation) => void,
@@ -2445,6 +2965,51 @@ export default function createOperationComponent(
     case "code_filter":
       return (
         <CodeOperationComponent
+          operation={operation}
+          onUpdate={onUpdate}
+          isSchemaExpanded={isSchemaExpanded}
+          onToggleSchema={onToggleSchema}
+        />
+      );
+    case "add_uuid":
+      return (
+        <AddUuidOperationComponent
+          operation={operation}
+          onUpdate={onUpdate}
+          isSchemaExpanded={isSchemaExpanded}
+          onToggleSchema={onToggleSchema}
+        />
+      );
+    case "topk":
+      return (
+        <TopKOperationComponent
+          operation={operation}
+          onUpdate={onUpdate}
+          isSchemaExpanded={isSchemaExpanded}
+          onToggleSchema={onToggleSchema}
+        />
+      );
+    case "cluster":
+      return (
+        <ClusterOperationComponent
+          operation={operation}
+          onUpdate={onUpdate}
+          isSchemaExpanded={isSchemaExpanded}
+          onToggleSchema={onToggleSchema}
+        />
+      );
+    case "link_resolve":
+      return (
+        <LinkResolveOperationComponent
+          operation={operation}
+          onUpdate={onUpdate}
+          isSchemaExpanded={isSchemaExpanded}
+          onToggleSchema={onToggleSchema}
+        />
+      );
+    case "equijoin":
+      return (
+        <EquijoinOperationComponent
           operation={operation}
           onUpdate={onUpdate}
           isSchemaExpanded={isSchemaExpanded}

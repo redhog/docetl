@@ -201,6 +201,35 @@ const AddOperationDropdown: React.FC<AddOperationDropdownProps> = ({
             onAddOperation("non-LLM", "web_search", "Untitled Web Search")
           }
         />
+        <OperationMenuItem
+          name="Top K"
+          description="Retrieves the top-k most relevant documents using embedding similarity, BM25 full-text search, or LLM comparison against a query."
+          onClick={() => onAddOperation("non-LLM", "topk", "Untitled Top K")}
+        />
+        <OperationMenuItem
+          name="Link Resolve"
+          description="Resolves dangling entity links in a list field by matching them to canonical IDs using embedding similarity and LLM comparison."
+          onClick={() =>
+            onAddOperation("LLM", "link_resolve", "Untitled Link Resolve")
+          }
+        />
+        <OperationMenuItem
+          name="Add UUID"
+          description="Adds a UUID string to every document under a configurable field name."
+          onClick={() =>
+            onAddOperation("non-LLM", "add_uuid", "Untitled Add UUID")
+          }
+        />
+        <OperationMenuItem
+          name="Cluster"
+          description="Hierarchically clusters documents using embeddings and summarizes each cluster node with an LLM. Adds a 'clusters' field to each document with its cluster path."
+          onClick={() => onAddOperation("LLM", "cluster", "Untitled Cluster")}
+        />
+        <OperationMenuItem
+          name="Equijoin"
+          description="Joins two datasets using LLM-based pairwise comparison with embedding blocking. Each pair of matching documents from left and right datasets produces one output document."
+          onClick={() => onAddOperation("LLM", "equijoin", "Untitled Equijoin")}
+        />
         <DropdownMenuSeparator />
         <DropdownMenuLabel className="font-bold text-sm bg-muted/50 py-2">
           Code Operations
